@@ -1,0 +1,88 @@
+// キャンバス(K)：キャンバスのサイズと背景
+
+import { CANVAS_PRESETS, MAX_CANVAS_SIDE, findPreset } from '../features/canvasPresets';
+import { button, checkbox, group, h, hint, numberInput, row, selectInput, type Choice } from '../ui/controls';
+import { icons } from '../ui/icons';
+import { registerTool } from './registry';
+import type { ToolHost } from './Tool';
+
+function setSize(host: ToolHost, width: number, height: number): void {
+  const w = Math.round(width);
+  const hgt = Math.round(height);
+  const c = host.editor.doc.canvas;
+  if (c.width === w && c.height === hgt) return;
+  host.editor.update('キャンバスサイズ', (d) => {
+    d.canvas.width = w;
+    d.canvas.height = hgt;
+  });
+  host.fitView();
+}
+
+registerTool({
+  id: 'canvas',
+  name: 'キャンバス',
+  icon: icons.canvas,
+  shortcut: 'K',
+  order: 70,
+  cursor: 'default',
+
+  createSettings(host) {
+    const { editor } = host;
+    const choices: Choice<string>[] = [...CANVAS_PRESETS.map((p) => ({ value: p.id, label: p.label })), { value: 'custom', label: '任意サイズ' }];
+    const presetSel = selectInput(choices, 'custom', (id) => {
+      const p = CANVAS_PRESETS.find((x) => x.id === id);
+      if (p) setSize(host, p.width, p.height);
+      else widthIn.input.focus();
+    });
+    const widthIn = numberInput({
+      value: editor.doc.canvas.width,
+      min: 1,
+      max: MAX_CANVAS_SIDE,
+      unit: 'px',
+      onChange: (v) => setSize(host, v, editor.doc.canvas.height),
+    });
+    const heightIn = numberInput({
+      value: editor.doc.canvas.height,
+      min: 1,
+      max: MAX_CANVAS_SIDE,
+      unit: 'px',
+      onChange: (v) => setSize(host, editor.doc.canvas.width, v),
+    });
+    const swapBtn = button('縦横を入れ替え', () => setSize(host, editor.doc.canvas.height, editor.doc.canvas.width), { icon: icons.rotateRight });
+
+    // 背景色：ドラッグ中はプレビュー、閉じたら1回分として履歴に残す
+    const color = h('input', { type: 'color', class: 'color' }) as HTMLInputElement;
+    color.addEventListener('input', () => {
+      if (!editor.inTransaction) editor.begin('背景色');
+      editor.preview((d) => {
+        d.canvas.background = color.value;
+      });
+    });
+    color.addEventListener('change', () => editor.commit());
+    const transparentCb = checkbox('透明', editor.doc.canvas.transparent, (v) => {
+      editor.update(v ? '背景を透明に' : '背景を不透明に', (d) => {
+        d.canvas.transparent = v;
+      });
+    });
+
+    const el = h(
+      'div',
+      {},
+      group('サイズ', presetSel.el, row('幅', widthIn.el), row('高さ', heightIn.el), swapBtn),
+      group('背景', row('背景色', color), transparentCb.el),
+      hint('サイズを変えても画像の位置はそのままです。並べ直すには「並べる(G)」を使います。'),
+    );
+
+    const update = () => {
+      const c = editor.doc.canvas;
+      presetSel.set(findPreset(c.width, c.height)?.id ?? 'custom');
+      widthIn.set(c.width);
+      heightIn.set(c.height);
+      if (document.activeElement !== color) color.value = c.background;
+      color.disabled = c.transparent;
+      transparentCb.set(c.transparent);
+    };
+    update();
+    return { el, update };
+  },
+});
