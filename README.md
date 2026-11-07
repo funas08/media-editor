@@ -87,5 +87,3 @@ src/
 - 新しいツールは `Tool` を実装して `src/tools/index.ts` に1行追加するだけで、左パネルのボタンと設定欄が増える
 - アイテムの描画は種類ごとに `registerItemRenderer` で登録する（将来テキストや図形を追加できる）
 - 描画処理は `render/` に閉じ込め、将来 WebGL / WebGPU に差し替えられるようにしている
-
-開発時の詳しい仕様とルールは [CLAUDE.md](CLAUDE.md) にまとめています。
