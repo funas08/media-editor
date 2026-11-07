@@ -16,7 +16,7 @@ import {
   type Target,
 } from 'mediabunny';
 import type { AssetStore } from '../core/AssetStore';
-import { activeClipAt, audioSegments, totalDuration } from '../core/timeline';
+import { audioSegments, clipTimesAt, totalDuration } from '../core/timeline';
 import type { DocState, VideoItem } from '../core/types';
 import type { FrameImage, VideoFrameProvider } from '../render/itemRenderers';
 import { drawScene } from '../render/scene';
@@ -33,6 +33,8 @@ export interface VideoExportOptions {
   fps: 30 | 60;
   quality: VideoQuality;
   includeAudio: boolean;
+  /** 書き出す範囲（秒）。null ならタイムライン全体 */
+  range: { from: number; to: number } | null;
 }
 
 export const QUALITY_LABEL: Record<VideoQuality, string> = { medium: '標準', high: '高', very_high: '最高' };
@@ -108,21 +110,22 @@ class ExportFrames implements VideoFrameProvider {
     this.media = media;
   }
 
-  /** 時刻 t に表示するクリップのフレームを用意する */
+  /** 時刻 t に表示するすべての動画クリップ（メイン・オーバーレイ）のフレームを用意する（デコーダーはクリップごと） */
   async prepare(doc: DocState, t: number): Promise<void> {
     this.ready.clear();
-    const a = activeClipAt(doc, t);
-    if (!a) return;
-    const item = a.span.item;
-    let seq = this.seqs.get(item.mediaId);
-    if (!seq) {
-      const entry = this.media.get(item.mediaId);
-      if (!entry) return;
-      seq = new SequentialFrames(new CanvasSink(entry.video, { poolSize: 4 }));
-      this.seqs.set(item.mediaId, seq);
+    for (const [id, ct] of clipTimesAt(doc, t)) {
+      const item = doc.items.find((x) => x.id === id);
+      if (item?.type !== 'video' || !item.visible) continue;
+      let seq = this.seqs.get(item.id);
+      if (!seq) {
+        const entry = this.media.get(item.mediaId);
+        if (!entry?.video) continue;
+        seq = new SequentialFrames(new CanvasSink(entry.video, { poolSize: 4 }));
+        this.seqs.set(item.id, seq);
+      }
+      const f = await seq.frameAt(ct.source);
+      if (f) this.ready.set(item.id, { image: f.canvas, width: f.canvas.width, height: f.canvas.height });
     }
-    const f = await seq.frameAt(a.sourceTime);
-    if (f) this.ready.set(item.id, { image: f.canvas, width: f.canvas.width, height: f.canvas.height });
   }
 
   frameFor(item: VideoItem): FrameImage | null {
@@ -135,14 +138,14 @@ class ExportFrames implements VideoFrameProvider {
 }
 
 /** 時刻 t0〜t1 の音声をミックスする（Web Audio のオフライン描画） */
-async function renderAudioWindow(doc: DocState, media: MediaStore, t0: number, t1: number): Promise<AudioSample> {
+async function renderAudioWindow(doc: DocState, media: MediaStore, t0: number, t1: number, timestamp: number): Promise<AudioSample> {
   const frames = Math.max(1, Math.round((t1 - t0) * SAMPLE_RATE));
   const ctx = new OfflineAudioContext(CHANNELS, frames, SAMPLE_RATE);
   await scheduleSegments(ctx, media, audioSegments(doc), { from: t0, to: t1, toCtxTime: (t) => t - t0, destination: ctx.destination });
   const buf = await ctx.startRendering();
   const data = new Float32Array(frames * CHANNELS);
   for (let c = 0; c < CHANNELS; c++) data.set(buf.getChannelData(Math.min(c, buf.numberOfChannels - 1)).subarray(0, frames), c * frames);
-  return new AudioSample({ data, format: 'f32-planar', numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, timestamp: t0 });
+  return new AudioSample({ data, format: 'f32-planar', numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, timestamp });
 }
 
 /** 動画を書き出す */
@@ -156,11 +159,14 @@ export async function exportVideo(
   signal: AbortSignal,
 ): Promise<void> {
   const { width, height } = videoExportSize(doc, o.scale);
+  // 範囲（I〜O）を書き出すときは、その開始を 0 秒として書き出す
+  const from = o.range ? o.range.from : 0;
+  const to = o.range ? o.range.to : totalDuration(doc);
   const plan: ExportPlan = {
     width,
     height,
     fps: o.fps,
-    duration: totalDuration(doc),
+    duration: Math.max(0, to - from),
     videoCodec: 'avc',
     videoBitrate: QUALITY_VALUE[o.quality],
     audio: o.includeAudio ? { bitrate: QUALITY_VALUE[o.quality], sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
@@ -173,7 +179,8 @@ export async function exportVideo(
     await runExport(plan, target, {
       signal,
       onProgress,
-      renderFrame: async (t) => {
+      renderFrame: async (t0) => {
+        const t = from + t0;
         await frames.prepare(doc, t);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         // 動画は透明を持てないので、キャンバスの外側や透明部分は黒にする
@@ -181,9 +188,9 @@ export async function exportVideo(
         ctx.fillRect(0, 0, width, height);
         ctx.setTransform(width / doc.canvas.width, 0, 0, height / doc.canvas.height, 0, 0);
         drawScene(ctx, doc, { assets, pixelScale: width / doc.canvas.width, time: t, frames });
-        return new VideoSample(canvas, { timestamp: t, duration: 1 / o.fps });
+        return new VideoSample(canvas, { timestamp: t0, duration: 1 / o.fps });
       },
-      renderAudio: plan.audio ? (t0, t1) => renderAudioWindow(doc, media, t0, t1) : undefined,
+      renderAudio: plan.audio ? (a, b) => renderAudioWindow(doc, media, from + a, from + b, a) : undefined,
     });
   } finally {
     await frames.dispose();

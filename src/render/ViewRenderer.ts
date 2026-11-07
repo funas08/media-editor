@@ -5,6 +5,7 @@ import type { AssetStore } from '../core/AssetStore';
 import type { DocState } from '../core/types';
 import type { CropShape } from '../core/types';
 import type { VideoFrameProvider } from './itemRenderers';
+import { renderOrder } from '../core/timeline';
 import { drawItems, withTimes } from './scene';
 import { addShapePath } from './shapes';
 import type { View } from './view';
@@ -115,6 +116,7 @@ export class CanvasSceneView implements SceneView {
     // キャンバス座標で描く
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * sx, dpr * sy);
     const env = withTimes(doc, { assets, pixelScale: dpr * z, pixelated: true, time, frames });
+    const order = renderOrder(doc);
 
     // はみ出した部分（薄く）
     ctx.save();
@@ -123,7 +125,7 @@ export class CanvasSceneView implements SceneView {
     addShapePath(ctx, area.shape, acx, acy, area.w, area.h);
     ctx.clip('evenodd');
     ctx.globalAlpha = OUTSIDE_ALPHA;
-    drawItems(ctx, doc.items, env);
+    drawItems(ctx, order, env);
     ctx.restore();
 
     // キャンバス内（背景とアイテム）
@@ -135,7 +137,7 @@ export class CanvasSceneView implements SceneView {
       ctx.fillStyle = doc.canvas.background;
       ctx.fillRect(area.x, area.y, area.w, area.h);
     }
-    drawItems(ctx, doc.items, env);
+    drawItems(ctx, order, env);
     ctx.restore();
 
     // 枠線とオーバーレイ（画面座標）

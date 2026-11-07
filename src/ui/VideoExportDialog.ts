@@ -12,7 +12,7 @@ import { openDialog } from './Dialog';
 
 const STORAGE_KEY = 'image-editor.videoExport';
 
-function loadPrefs(): Omit<VideoExportOptions, 'includeAudio'> {
+function loadPrefs(): Omit<VideoExportOptions, 'includeAudio' | 'range'> {
   const def = { scale: 1, fps: 30 as const, quality: 'high' as VideoQuality };
   try {
     const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<VideoExportOptions> | null;
@@ -31,8 +31,16 @@ function sizeName(w: number, h: number): string {
   return names[`${w}x${h}`] ?? '';
 }
 
-export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: MediaStore, toast: (m: string) => void): void {
-  const duration = totalDuration(doc);
+export function openVideoExportDialog(
+  doc: DocState,
+  assets: AssetStore,
+  media: MediaStore,
+  toast: (m: string) => void,
+  ioRange: { from: number; to: number } | null,
+): void {
+  let useRange = false;
+  const fullDuration = totalDuration(doc);
+  const durationNow = () => (useRange && ioRange ? ioRange.to - ioRange.from : fullDuration);
   const hasAudio = audioSegments(doc).some((s) => media.get(s.mediaId)?.audio);
   const prefs = loadPrefs();
   let aacOk = true;
@@ -73,6 +81,20 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
       void recheck();
     },
   );
+  const rangeSeg = segmented<string>(
+    [
+      { value: 'all', label: 'タイムライン全体' },
+      { value: 'io', label: 'I〜O の範囲', title: ioRange ? '' : 'タイムラインで I と O を指定すると選べます' },
+    ],
+    'all',
+    (v) => {
+      if (v === 'io' && !ioRange) return;
+      useRange = v === 'io';
+      rangeSeg.set(v);
+      update();
+    },
+  );
+  const rangeNote = text(ioRange ? `I〜O：${formatTime(ioRange.from)} 〜 ${formatTime(ioRange.to)}` : 'I〜O の範囲は未指定です（タイムラインで I / O キー）', 'hint');
   const sizeText = text('', 'export-size');
   const sizeNote = text('', 'hint');
   const support = text('確認中…', 'hint');
@@ -88,6 +110,7 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
     'div',
     { class: 'export-form' },
     group('形式', h('div', { class: 'value' }, 'MP4（映像 H.264 / 音声 AAC）'), support.el),
+    group('書き出す範囲', rangeSeg.el, rangeNote.el),
     group('倍率（キャンバスに対して）', scaleSeg.el),
     group('書き出しサイズ', sizeText.el, sizeNote.el),
     group('フレームレート', fpsSeg.el),
@@ -105,7 +128,7 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
     const { width, height, adjusted } = videoExportSize(doc, prefs.scale);
     const name = sizeName(width, height);
     sizeText.set(`${width} × ${height} px${name ? `（${name}）` : ''}`);
-    sizeNote.set(`長さ ${formatTime(duration)}・${prefs.fps}fps・約 ${Math.max(1, Math.round(duration * prefs.fps))} フレーム${adjusted ? '（H.264 の制約で幅・高さを偶数に切り下げ）' : ''}`);
+    sizeNote.set(`長さ ${formatTime(durationNow())}・${prefs.fps}fps・約 ${Math.max(1, Math.round(durationNow() * prefs.fps))} フレーム${adjusted ? '（H.264 の制約で幅・高さを偶数に切り下げ）' : ''}`);
     const lines: string[] = [];
     if (!videoOk) lines.push('⚠ この環境ではこのサイズ・設定の H.264 をエンコードできません。倍率・フレームレート・画質を下げてください');
     if (!aacOk && hasAudio) lines.push('⚠ この環境（ブラウザ／OS）では音声を AAC でエンコードできません。「音声なしで書き出す」を選ぶと書き出せます');
@@ -114,14 +137,14 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
     support.el.classList.toggle('warn', !videoOk || (!aacOk && hasAudio));
     noAudioCb.input.disabled = !hasAudio || running;
     const withAudio = hasAudio && !noAudioCb.input.checked;
-    exportBtn.disabled = running || duration <= 0 || !videoOk || (withAudio && !aacOk);
+    exportBtn.disabled = running || durationNow() <= 0 || !videoOk || (withAudio && !aacOk);
   }
 
   async function recheck(): Promise<void> {
     const seq = ++checkSeq;
     support.set('確認中…');
     exportBtn.disabled = true;
-    const r = await checkVideoSupport(doc, { ...prefs, includeAudio: true });
+    const r = await checkVideoSupport(doc, { ...prefs, includeAudio: true, range: null });
     if (seq !== checkSeq) return;
     videoOk = r.video;
     aacOk = r.audio;
@@ -143,11 +166,11 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
     controller = new AbortController();
     progressWrap.hidden = false;
     cancelBtn.textContent = 'キャンセル';
-    for (const s of [scaleSeg, fpsSeg, qualitySeg]) s.el.classList.add('disabled');
+    for (const s of [scaleSeg, fpsSeg, qualitySeg, rangeSeg]) s.el.classList.add('disabled');
     update();
     const startedAt = performance.now();
     try {
-      await exportVideo(doc, assets, media, { ...prefs, includeAudio: hasAudio && !noAudioCb.input.checked }, dest.target, (r) => {
+      await exportVideo(doc, assets, media, { ...prefs, includeAudio: hasAudio && !noAudioCb.input.checked, range: useRange && ioRange ? ioRange : null }, dest.target, (r) => {
         progress.value = r;
         const elapsed = (performance.now() - startedAt) / 1000;
         const remain = r > 0.01 ? (elapsed / r) * (1 - r) : 0;
@@ -168,7 +191,7 @@ export function openVideoExportDialog(doc: DocState, assets: AssetStore, media: 
       running = false;
       progressWrap.hidden = true;
       cancelBtn.textContent = '閉じる';
-      for (const s of [scaleSeg, fpsSeg, qualitySeg]) s.el.classList.remove('disabled');
+      for (const s of [scaleSeg, fpsSeg, qualitySeg, rangeSeg]) s.el.classList.remove('disabled');
       update();
     }
   }

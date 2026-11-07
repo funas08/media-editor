@@ -16,7 +16,8 @@ export class LayerPanel {
   private editor: Editor;
   private list: HTMLElement;
   private count: HTMLElement;
-  private body: HTMLElement;
+  /** 一覧とボタンの部分（タブに入れるとき用） */
+  readonly body: HTMLElement;
   private toggleBtn: HTMLButtonElement;
   private actionBtns: HTMLButtonElement[];
   private signature = '';
@@ -24,6 +25,8 @@ export class LayerPanel {
   private thumbs = new WeakMap<ImageBitmap, Map<string, string>>();
   private collapsed: boolean;
   private renaming: string | null = null;
+  /** アイテムの数（タブの表示用） */
+  itemCount = 0;
 
   constructor(editor: Editor) {
     this.editor = editor;
@@ -75,6 +78,7 @@ export class LayerPanel {
     if (sig !== this.signature) {
       this.signature = sig;
       this.count.textContent = `${doc.items.length}`;
+    this.itemCount = doc.items.length;
       const rows = [...doc.items].reverse().map((it) => this.row(it));
       if (rows.length === 0) rows.push(h('li', { class: 'layer-empty' }, '画像はまだありません'));
       this.list.replaceChildren(...rows);

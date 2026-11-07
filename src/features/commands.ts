@@ -4,6 +4,7 @@ import type { Asset } from '../core/AssetStore';
 import { createDoc, createImageItem, newId } from '../core/doc';
 import type { Editor } from '../core/Editor';
 import { hitTest } from '../core/geometry';
+import { isTrackLocked } from '../core/timeline';
 import type { DocState, Item, Point } from '../core/types';
 
 /** 画像を読み込む。失敗したファイル名も返す */
@@ -151,5 +152,5 @@ export function setItemProps(editor: Editor, id: string, label: string, props: P
 
 /** 操作対象：選択中で、表示中かつロックされていないアイテム */
 export function editableSelection(editor: Editor): Item[] {
-  return editor.doc.items.filter((it) => editor.selection.includes(it.id) && it.visible && !it.locked);
+  return editor.doc.items.filter((it) => editor.selection.includes(it.id) && it.visible && !it.locked && !isTrackLocked(editor.doc, it));
 }

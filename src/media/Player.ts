@@ -4,7 +4,7 @@
 import { audioSegments } from '../core/timeline';
 import type { DocState } from '../core/types';
 import type { MediaStore } from './MediaStore';
-import { scheduleSegments } from './audioSchedule';
+import { scheduleSegments, type ScheduleOptions } from './audioSchedule';
 
 /** 何秒先まで音声を並べておくか */
 const LOOKAHEAD = 1.5;
@@ -44,25 +44,25 @@ export class Player {
     this.startT = from;
     this.pausedAt = from;
     this.playing = true;
-    try {
-      await scheduleSegments(ctx, this.media, audioSegments(doc), {
-        from,
-        to: Infinity,
-        toCtxTime: (t) => this.startCtx + (t - this.startT),
-        destination: this.master!,
-        isCanceled: () => sid !== this.session,
-        onNode: (n) => {
-          this.nodes.add(n);
-          n.onended = () => this.nodes.delete(n);
-        },
-        afterSchedule: async (when) => {
-          // 先読みしすぎないよう、再生位置が近づくまで待つ
-          while (sid === this.session && when - ctx.currentTime > LOOKAHEAD) await sleep(150);
-        },
-      });
-    } catch (e) {
-      console.error('音声の再生に失敗しました', e);
-    }
+    // 区間ごとに並行して並べる（メインの音声と音楽など、同時に鳴る区間があるため）
+    const opts: ScheduleOptions = {
+      from,
+      to: Infinity,
+      toCtxTime: (t) => this.startCtx + (t - this.startT),
+      destination: this.master!,
+      isCanceled: () => sid !== this.session,
+      onNode: (n) => {
+        this.nodes.add(n);
+        n.onended = () => this.nodes.delete(n);
+      },
+      afterSchedule: async (when) => {
+        // 先読みしすぎないよう、再生位置が近づくまで待つ
+        while (sid === this.session && when - ctx.currentTime > LOOKAHEAD) await sleep(150);
+      },
+    };
+    await Promise.all(
+      audioSegments(doc).map((seg) => scheduleSegments(ctx, this.media, [seg], opts).catch((e) => console.error('音声の再生に失敗しました', e))),
+    );
   }
 
   pause(): void {

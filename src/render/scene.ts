@@ -1,6 +1,6 @@
 // ドキュメント全体の描画（表示・書き出しで共通）
 
-import { isItemShownAt, videoTimesAt } from '../core/timeline';
+import { clipTimesAt, isItemShownAt, renderOrder } from '../core/timeline';
 import type { DocState, Item } from '../core/types';
 import { getItemRenderer, type Ctx2D, type DrawEnv } from './itemRenderers';
 import { addShapePath } from './shapes';
@@ -14,16 +14,16 @@ export function drawBackground(ctx: Ctx2D, doc: DocState): void {
   ctx.restore();
 }
 
-/** 描く時刻の動画クリップを決めた env を作る（time がなければ 0 秒） */
+/** 描く時刻のクリップを決めた env を作る（time がなければ 0 秒） */
 export function withTimes(doc: DocState, env: DrawEnv): DrawEnv {
-  return env.videoTimes ? env : { ...env, videoTimes: videoTimesAt(doc, env.time ?? 0) };
+  return env.clipTimes ? env : { ...env, clipTimes: clipTimesAt(doc, env.time ?? 0) };
 }
 
-/** アイテムを描く。env.videoTimes がある場合、その時刻に表示しない動画クリップは描かない */
+/** アイテムを描く。env.clipTimes がある場合、その時刻に表示しないクリップは描かない */
 export function drawItems(ctx: Ctx2D, items: readonly Item[], env: DrawEnv): void {
   for (const it of items) {
     if (!it.visible) continue;
-    if (env.videoTimes && !isItemShownAt(it, env.videoTimes)) continue;
+    if (env.clipTimes && !isItemShownAt(it, env.clipTimes)) continue;
     getItemRenderer(it.type)?.draw(ctx, it, env);
   }
 }
@@ -40,6 +40,6 @@ export function drawScene(ctx: Ctx2D, doc: DocState, envIn: DrawEnv): void {
     ctx.clip();
   }
   drawBackground(ctx, doc);
-  drawItems(ctx, doc.items, env);
+  drawItems(ctx, renderOrder(doc), env);
   if (shaped) ctx.restore();
 }

@@ -1,8 +1,9 @@
 // アプリ全体の組み立て：Editor・表示・ツール・UI をつなぎ、入力（マウス・キーボード・D&D・貼り付け）を振り分ける
 
 import { Editor } from '../core/Editor';
-import { createDoc, createVideoItem } from '../core/doc';
-import { isItemShownAt, snapToFrame, totalDuration, videoTimesAt } from '../core/timeline';
+import { createDoc } from '../core/doc';
+import { isItemShownAt, isTrackLocked, mainDuration, snapToFrame, totalDuration, videoTimesAt } from '../core/timeline';
+import { isSourceUsed, makeClipItem, makeMusicClip } from '../features/clips';
 import type { Item, Point } from '../core/types';
 import {
   addImageItems,
@@ -17,14 +18,14 @@ import {
   usedAssetIds,
 } from '../features/commands';
 import { fitToCanvas } from '../features/transform';
-import { cutRange, splitAt } from '../features/videoEdit';
+import { addTrack, cutRange, insertIntoMain, placeOnOverlay, splitAt } from '../features/videoEdit';
 import { IMAGE_ACCEPT, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
 import { PROJECT_EXT, buildProject, restoreProject } from '../io/project';
 import { LocalFileProjectStorage, type ProjectStorage } from '../io/ProjectStorage';
 import type { DocState } from '../core/types';
 import { ACCENT, strokeItem } from '../render/overlay';
 import { CanvasSceneView } from '../render/ViewRenderer';
-import { MediaLoadError, MediaStore, isVideoFile, type MediaEntry } from '../media/MediaStore';
+import { MediaStore, isAudioFile, isVideoFile } from '../media/MediaStore';
 import { Player } from '../media/Player';
 import { PreviewFrames } from '../media/PreviewFrames';
 import { View } from '../render/view';
@@ -40,7 +41,12 @@ import { openShortcutsDialog } from './ShortcutsDialog';
 import { openStartDialog } from './StartDialog';
 import { StatusBar } from './StatusBar';
 import { Toaster } from './toast';
-import { Timeline } from './Timeline';
+import { Timeline, type DropTarget } from './Timeline';
+import { AssetsPanel } from './AssetsPanel';
+import { ClipPanel } from './ClipPanel';
+import { getLibraryDrag, hasFiles } from './dragState';
+import { Library, type LibraryEntry } from './Library';
+import { PanelTabs } from './PanelTabs';
 import { TopBar, type EditorMode } from './TopBar';
 import { openVideoExportDialog } from './VideoExportDialog';
 
@@ -74,6 +80,13 @@ export class App implements ToolHost {
   /** I / O で指定した範囲（秒） */
   private rangeIn: number | null = null;
   private rangeOut: number | null = null;
+  /** 素材の一覧 */
+  readonly library: Library;
+  private assetsPanel: AssetsPanel;
+  private tabs: PanelTabs;
+  private clipPanel: ClipPanel;
+  /** 選択中の音楽クリップ（音楽はアイテムではないので別に持つ） */
+  private musicSel: string | null = null;
 
   private renderQueued = false;
   private fitted = false;
@@ -116,7 +129,25 @@ export class App implements ToolHost {
 
     this.left = new LeftPanel(this);
     this.layers = new LayerPanel(this.editor);
-    this.left.bottom.append(this.layers.el);
+    this.library = new Library(this.editor.assets, this.media);
+    this.assetsPanel = new AssetsPanel(this.library, {
+      importFiles: (files) => this.importFiles(files),
+      pickAndImport: () => void this.pickAndImport(),
+      quickPlace: (e) => void this.quickPlace(e),
+      removeSource: (e) => this.removeSource(e),
+    });
+    this.tabs = new PanelTabs([
+      { id: 'assets', title: '素材', el: this.assetsPanel.el, count: () => this.assetsPanel.count },
+      { id: 'layers', title: 'レイヤー', el: this.layers.body, count: () => this.layers.itemCount },
+    ]);
+    this.left.bottom.append(this.tabs.el);
+    this.library.changed.on(() => this.tabs.update());
+    this.clipPanel = new ClipPanel({
+      editor: this.editor,
+      getMusicSelection: () => this.musicSel,
+      selectMusic: (id) => this.selectMusic(id),
+    });
+    this.left.extra.append(this.clipPanel.el);
     const canvas = h('canvas', { class: 'scene' });
     this.scene = new CanvasSceneView(canvas);
     this.emptyState = h(
@@ -148,6 +179,9 @@ export class App implements ToolHost {
       split: () => this.splitAtPlayhead(),
       cutRange: () => this.cutSelectedRange(),
       fitClips: (mode) => this.fitClips(mode),
+      placeSources: (sources, target) => void this.placeSources(sources, target),
+      getMusicSelection: () => this.musicSel,
+      selectMusic: (id) => this.selectMusic(id),
     });
     this.timeline.el.hidden = true;
 
@@ -205,6 +239,10 @@ export class App implements ToolHost {
   refreshUI(): void {
     this.left.update();
     this.layers.update();
+    this.tabs.update();
+    if (this.musicSel && !this.editor.doc.timeline.music.some((m) => m.id === this.musicSel)) this.musicSel = null;
+    this.clipPanel.update();
+    if (this.mode !== 'video') this.clipPanel.el.hidden = true;
     this.topBar.update(this.editor, this.view);
     this.emptyState.hidden = this.editor.doc.items.length > 0;
     document.title = `${this.isDirty() ? '● ' : ''}${this.projectName ?? '無題'} - 画像エディタ`;
@@ -283,7 +321,13 @@ export class App implements ToolHost {
   // ===== 動画モード：モード切り替え・再生 =====
 
   isShown(it: Item): boolean {
-    return isItemShownAt(it, videoTimesAt(this.editor.doc, this.player.time));
+    return isItemShownAt(it, videoTimesAt(this.editor.doc, this.player.time)) && !isTrackLocked(this.editor.doc, it);
+  }
+
+  private selectMusic(id: string | null): void {
+    this.musicSel = id;
+    if (id) this.editor.setSelection([]);
+    this.refreshUI();
   }
 
   setMode(mode: EditorMode): void {
@@ -392,9 +436,9 @@ export class App implements ToolHost {
 
   /** 選択中（なければ全部）の動画クリップをキャンバスに収める／埋める */
   private fitClips(mode: 'fit' | 'fill'): void {
-    const videos = this.editor.doc.items.filter((it) => it.type === 'video' && !it.locked);
-    const selected = videos.filter((it) => this.editor.isSelected(it.id));
-    const ids = (selected.length > 0 ? selected : videos).map((it) => it.id);
+    const clips = this.editor.doc.items.filter((it) => it.clip && !it.locked);
+    const selected = clips.filter((it) => this.editor.isSelected(it.id));
+    const ids = (selected.length > 0 ? selected : clips.filter((it) => it.clip?.track === 'main')).map((it) => it.id);
     if (ids.length === 0) return;
     this.editor.update(mode === 'fit' ? 'キャンバスに収める' : 'キャンバスを埋める', (d) => fitToCanvas(d, ids, mode));
     this.toast(`${ids.length}本のクリップを${mode === 'fit' ? 'キャンバスに収めました' : 'キャンバスいっぱいにしました'}`);
@@ -633,10 +677,19 @@ export class App implements ToolHost {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
+        if (this.mode === 'video' && this.musicSel) {
+          const id = this.musicSel;
+          this.musicSel = null;
+          this.editor.update('音楽を削除', (d) => {
+            d.timeline.music = d.timeline.music.filter((m) => m.id !== id);
+          });
+          return;
+        }
         deleteSelected(this.editor);
         return;
       }
       if (e.key === 'Escape') {
+        this.musicSel = null;
         this.editor.setSelection([]);
         return;
       }
@@ -691,11 +744,17 @@ export class App implements ToolHost {
         void this.loadProject(project);
         return;
       }
-      const videos = files.filter(isVideoFile);
-      const others = files.filter((f) => !isVideoFile(f));
-      if (videos.length > 0) void this.addVideoFiles(videos);
+      // 動画モード：メインの最後に置く。画像モード：動画・音楽は動画モードへ、画像はキャンバスへ
+      if (this.mode === 'video') {
+        void this.placeSources(files, { kind: 'main', t: mainDuration(this.editor.doc) });
+        return;
+      }
+      const media = files.filter((f) => isVideoFile(f) || isAudioFile(f));
+      const others = files.filter((f) => !isVideoFile(f) && !isAudioFile(f));
+      if (media.length > 0) void this.addVideoFiles(media);
       if (others.length > 0) void this.addFiles(others);
     });
+    this.bindCanvasDrop();
     // 保存していない変更があるときは、ページを閉じる前に確認する
     window.addEventListener('beforeunload', (e) => {
       if (this.isDirty()) e.preventDefault();
@@ -705,8 +764,135 @@ export class App implements ToolHost {
       const files = imagesFromClipboard(e);
       if (files.length === 0) return;
       e.preventDefault();
-      void this.addFiles(files);
+      // 動画モードでは再生位置からオーバーレイとして、キャンバスの中央に置く
+      if (this.mode === 'video') {
+        const c = this.editor.doc.canvas;
+        void this.placeSources(files, { kind: 'canvas', point: { x: c.width / 2, y: c.height / 2 } });
+      } else void this.addFiles(files);
     });
+  }
+
+  // ===== キャンバスへのドロップ =====
+
+  /** 素材パネル・ファイルをキャンバスに落とす：再生位置の時刻からオーバーレイとして、落とした位置に置く */
+  private bindCanvasDrop(): void {
+    const vp = this.viewport;
+    const accepts = (e: DragEvent) => getLibraryDrag(e) !== null || (this.mode === 'video' && hasFiles(e));
+    vp.addEventListener('dragover', (e) => {
+      if (!accepts(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer!.dropEffect = 'copy';
+      vp.classList.add('drag-over');
+      clearTimeout(this.dropTimer);
+      this.dropTimer = window.setTimeout(() => vp.classList.remove('drag-over'), 150);
+    });
+    vp.addEventListener('drop', (e) => {
+      if (!accepts(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      vp.classList.remove('drag-over');
+      const r = vp.getBoundingClientRect();
+      const point = this.view.screenToDoc({ x: e.clientX - r.left, y: e.clientY - r.top });
+      const lib = getLibraryDrag(e);
+      const sources = lib ?? filesFromDrop(e);
+      // 画像モードで素材パネルの画像を落としたときは、時刻に関係なくキャンバスに置く
+      if (this.mode === 'image' && lib && lib.every((x) => x.kind === 'image')) {
+        const assets = lib.flatMap((x) => this.editor.assets.get(x.id) ?? []);
+        addImageItems(this.editor, assets);
+        const ids = this.editor.selection;
+        this.editor.update('位置', (d) => {
+          d.items.forEach((it) => {
+            if (!ids.includes(it.id)) return;
+            it.cx = point.x;
+            it.cy = point.y;
+          });
+        });
+        return;
+      }
+      void this.placeSources(sources, { kind: 'canvas', point });
+    });
+  }
+
+  // ===== 素材 =====
+
+  /** ファイルを素材として読み込む（タイムラインには置かない） */
+  private async importFiles(files: File[]): Promise<LibraryEntry[]> {
+    if (files.length === 0) return [];
+    const entries = await this.library.importFiles(files, (m) => this.toast(m));
+    return entries;
+  }
+
+  private async pickAndImport(): Promise<void> {
+    const files = await pickFiles(`${IMAGE_ACCEPT},video/*,audio/*,.mp4,.mov,.m4v,.webm,.mkv,.mp3,.wav,.m4a,.aac,.ogg,.flac`, true);
+    const entries = await this.importFiles(files);
+    if (entries.length > 0) this.toast(`${entries.length}件の素材を読み込みました（タイムラインやキャンバスにドラッグして置けます）`);
+  }
+
+  /**
+   * 素材（またはファイル）を置く。1回の操作として履歴に残す。
+   * - メイン：時刻に挿入（境目に吸着・途中なら分割）、複数は順に
+   * - オーバーレイ・新しいトラック：その時刻に。重なれば別のトラック。複数は同じ時刻で別々のトラック
+   * - キャンバス：再生位置の時刻からオーバーレイとして、落とした位置に
+   * - 音楽：どこに落としても音楽トラックのその時刻に
+   */
+  private async placeSources(sources: LibraryEntry[] | File[], target: DropTarget | { kind: 'canvas'; point: Point }): Promise<void> {
+    const entries = sources.length > 0 && sources[0] instanceof File ? await this.importFiles(sources as File[]) : (sources as LibraryEntry[]);
+    if (entries.length === 0) return;
+    const now = this.player.time;
+    const ids: string[] = [];
+    let musicCount = 0;
+    this.editor.update('素材を配置', (d) => {
+      const at = target.kind === 'main' ? target.t : target.kind === 'canvas' ? now : target.start;
+      for (const m of entries.filter((x) => x.kind === 'audio')) {
+        d.timeline.music.push(makeMusicClip(m, at));
+        musicCount++;
+      }
+      const visual = entries.filter((x) => x.kind !== 'audio');
+      if (visual.length === 0) return;
+      if (target.kind === 'main') {
+        const items = visual.map((x) => makeClipItem(x, d.canvas, 'main'));
+        insertIntoMain(d, items, target.t, 0.05);
+        ids.push(...items.map((it) => it.id));
+        return;
+      }
+      let trackId: string | null = null;
+      if (target.kind === 'overlay') trackId = target.trackId;
+      else if (target.kind === 'newTrack') trackId = addTrack(d).id;
+      else trackId = d.timeline.overlays[0]?.id ?? null;
+      visual.forEach((x, i) => {
+        const center = target.kind === 'canvas' ? { x: target.point.x + i * 40, y: target.point.y + i * 40 } : undefined;
+        const it = makeClipItem(x, d.canvas, 'overlay', center);
+        placeOnOverlay(d, it, trackId, at);
+        ids.push(it.id);
+      });
+    });
+    if (ids.length > 0) this.editor.setSelection(ids);
+    this.setMode('video');
+    const parts = [ids.length > 0 ? `${ids.length}個のクリップ` : '', musicCount > 0 ? `${musicCount}曲の音楽` : ''].filter(Boolean);
+    this.toast(`${parts.join('と')}を置きました`);
+  }
+
+  /** 素材パネルのダブルクリック：動画・画像はメインの最後、音楽は再生位置。画像モードの画像はキャンバスに */
+  private async quickPlace(e: LibraryEntry): Promise<void> {
+    if (this.mode === 'image' && e.kind === 'image') {
+      const a = this.editor.assets.get(e.id);
+      if (a) addImageItems(this.editor, [a]);
+      return;
+    }
+    await this.placeSources([e], e.kind === 'audio' ? { kind: 'main', t: this.player.time } : { kind: 'main', t: mainDuration(this.editor.doc) });
+  }
+
+  /** 素材を削除する。使用中なら確認し、使っているクリップも削除する */
+  private removeSource(e: LibraryEntry): void {
+    if (isSourceUsed(this.editor.doc, e.id)) {
+      if (!window.confirm(`「${e.name}」は使用中です。使っているクリップも削除しますか？`)) return;
+      this.editor.update('素材を削除', (d) => {
+        d.items = d.items.filter((it) => (it.type === 'image' ? it.assetId : it.mediaId) !== e.id);
+        d.timeline.music = d.timeline.music.filter((m) => m.mediaId !== e.id);
+      });
+    }
+    this.library.remove(e.id);
   }
 
   // ===== 動画の追加 =====
@@ -716,42 +902,10 @@ export class App implements ToolHost {
     await this.addVideoFiles(files);
   }
 
-  /** 動画を読み込む（読めなかったファイルは理由を表示） */
-  private async loadVideos(files: File[]): Promise<MediaEntry[]> {
-    const loaded: MediaEntry[] = [];
-    for (const f of files) {
-      try {
-        loaded.push(await this.media.add(f));
-      } catch (e) {
-        this.toast(`${f.name}：${e instanceof MediaLoadError ? e.message : '読み込めませんでした'}`);
-      }
-    }
-    return loaded;
-  }
-
-  /** 動画を動画トラックの最後に追加する（キャンバスに収まる大きさで中央に置く） */
+  /** 動画（と音楽）をメインの最後に追加する */
   async addVideoFiles(files: File[]): Promise<void> {
     if (files.length === 0) return;
-    const loaded = await this.loadVideos(files);
-    if (loaded.length === 0) return;
-    const ids: string[] = [];
-    this.editor.update(loaded.length > 1 ? `動画を追加（${loaded.length}本）` : '動画を追加', (d) => {
-      const { width: W, height: H } = d.canvas;
-      // 動画は画像より下（奥）に置く：最後の動画クリップの直後に入れる
-      let at = 0;
-      d.items.forEach((it, i) => {
-        if (it.type === 'video') at = i + 1;
-      });
-      for (const m of loaded) {
-        const scale = Math.min(W / m.info.width, H / m.info.height);
-        const item = createVideoItem(m.info, W / 2, H / 2, scale);
-        d.items.splice(at++, 0, item);
-        ids.push(item.id);
-      }
-    });
-    this.editor.setSelection(ids);
-    this.setMode('video');
-    this.toast(`${loaded.length}本の動画を追加しました`);
+    await this.placeSources(files, { kind: 'main', t: mainDuration(this.editor.doc) });
   }
 
   /** 動画を編集：1本目の動画のサイズのキャンバスで、動画モードの新しいドキュメントにする */
@@ -761,20 +915,18 @@ export class App implements ToolHost {
       if (files) this.toast('動画ファイルではありません');
       return false;
     }
-    const loaded = await this.loadVideos(list);
-    if (loaded.length === 0) return false;
-    const first = loaded[0].info;
+    const entries = (await this.importFiles(list)).filter((x) => x.kind === 'video');
+    if (entries.length === 0) return false;
+    const first = entries[0];
     const doc = createDoc(first.width - (first.width % 2), first.height - (first.height % 2));
     doc.canvas.background = '#000000';
-    // 動画クリップを入れてから差し替える（先に差し替えると、読み込んだ動画が「未使用」として解放されるため）
-    for (const m of loaded) {
-      const scale = Math.min(doc.canvas.width / m.info.width, doc.canvas.height / m.info.height);
-      doc.items.push(createVideoItem(m.info, doc.canvas.width / 2, doc.canvas.height / 2, scale));
-    }
+    // クリップを入れてから差し替える（先に差し替えると、読み込んだ動画が「未使用」として解放されるため）
+    for (const x of entries) doc.items.push(makeClipItem(x, doc.canvas, 'main'));
     this.replaceDocument(doc, null);
-    this.stepFps = Math.round(first.fps) >= 50 ? 60 : 30;
+    const fps = this.media.get(first.id)?.info.fps ?? 30;
+    this.stepFps = Math.round(fps) >= 50 ? 60 : 30;
     this.setMode('video');
-    this.toast(`${loaded.length}本の動画を開きました（${doc.canvas.width}×${doc.canvas.height}）`);
+    this.toast(`${entries.length}本の動画を開きました（${doc.canvas.width}×${doc.canvas.height}）`);
     return true;
   }
 
@@ -785,6 +937,7 @@ export class App implements ToolHost {
     await this.addFiles(files);
   }
 
+  /** 画像を今のキャンバスに追加する（素材にも登録する） */
   async addFiles(files: File[]): Promise<void> {
     const images = files.filter(isImageFile);
     const skipped = files.length - images.length;
@@ -792,11 +945,11 @@ export class App implements ToolHost {
       if (files.length > 0) this.toast('画像ファイルではありません');
       return;
     }
-    const { assets, failed } = await loadAssets(this.editor, images);
+    const entries = await this.importFiles(images);
+    const assets = entries.flatMap((x) => this.editor.assets.get(x.id) ?? []);
     addImageItems(this.editor, assets);
     if (assets.length > 0) this.toast(`${assets.length}枚の画像を追加しました`);
-    if (failed.length > 0) this.toast(`読み込めませんでした：${failed.join('、')}`);
-    else if (skipped > 0) this.toast(`画像以外のファイル ${skipped} 件は無視しました`);
+    if (skipped > 0) this.toast(`画像以外のファイル ${skipped} 件は無視しました`);
   }
 
   // ===== 新規作成・開く =====
@@ -812,11 +965,17 @@ export class App implements ToolHost {
     this.player.pause();
     this.player.seek(doc, 0);
     this.editor.reset(doc);
-    this.editor.assets.retainOnly(usedAssetIds(doc));
-    const mediaIds = new Set(doc.items.flatMap((it) => (it.type === 'video' ? [it.mediaId] : [])));
+    this.musicSel = null;
+    const assetIds = usedAssetIds(doc);
+    this.editor.assets.retainOnly(assetIds);
+    const mediaIds = new Set([...doc.items.flatMap((it) => (it.type === 'video' ? [it.mediaId] : [])), ...doc.timeline.music.map((m) => m.mediaId)]);
     this.media.retainOnly(mediaIds);
     this.frames.retainOnly(mediaIds);
-    this.setMode(mediaIds.size > 0 ? 'video' : 'image');
+    // 素材の一覧：使っているものだけ残し、まだ一覧にないもの（プロジェクトの画像など）を登録する
+    this.library.retainOnly(new Set([...assetIds, ...mediaIds]));
+    for (const id of assetIds) this.library.registerImage(id);
+    for (const id of mediaIds) void this.library.registerMedia(id);
+    this.setMode(mediaIds.size > 0 || doc.items.some((it) => it.clip) ? 'video' : 'image');
     this.savedDoc = this.editor.doc;
     this.projectName = projectName;
     if (projectName === null) this.storage.forget();
@@ -863,6 +1022,7 @@ export class App implements ToolHost {
       this.toast(`読み込めませんでした：${first.name}`);
       return false;
     }
+    this.library.registerImage(assets[0].id);
     this.replaceDocument(documentFromImage(assets[0]), null);
     this.toast(`${first.name} を開きました（${assets[0].width}×${assets[0].height}）`);
     if (rest.length > 0) await this.addFiles(rest);
@@ -887,7 +1047,8 @@ export class App implements ToolHost {
         this.toast('書き出す動画がありません。動画を追加してください');
         return;
       }
-      openVideoExportDialog(this.editor.doc, this.editor.assets, this.media, (m) => this.toast(m));
+      const range = this.rangeIn !== null && this.rangeOut !== null && Math.abs(this.rangeOut - this.rangeIn) > 1e-6 ? { from: Math.min(this.rangeIn, this.rangeOut), to: Math.max(this.rangeIn, this.rangeOut) } : null;
+      openVideoExportDialog(this.editor.doc, this.editor.assets, this.media, (m) => this.toast(m), range);
     } else {
       openExportDialog(this.editor, (m) => this.toast(m));
     }

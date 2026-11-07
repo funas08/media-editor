@@ -13,6 +13,8 @@ export class LeftPanel {
   private settings: ToolSettings | null = null;
   /** レイヤー一覧などを差し込む場所 */
   readonly bottom: HTMLElement;
+  /** 設定欄の下に追加で表示する場所（動画モードの「クリップ」など） */
+  readonly extra: HTMLElement;
 
   constructor(host: ToolHost) {
     this.toolList = h('nav', { class: 'tool-list', 'aria-label': 'ツール' });
@@ -36,11 +38,12 @@ export class LeftPanel {
     this.settingsTitle = h('div', { class: 'panel-title' });
     this.settingsBody = h('div', { class: 'settings-body' });
     this.bottom = h('div', { class: 'panel-bottom' });
+    this.extra = h('div', { class: 'settings-extra' });
     this.el = h(
       'aside',
       { class: 'left-panel' },
       this.toolList,
-      h('section', { class: 'settings' }, this.settingsTitle, this.settingsBody),
+      h('section', { class: 'settings' }, this.settingsTitle, this.settingsBody, this.extra),
       this.bottom,
     );
   }

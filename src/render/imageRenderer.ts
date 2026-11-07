@@ -2,6 +2,7 @@
 
 import { DEFAULT_ADJUST } from '../core/doc';
 import { DEG, itemSize } from '../core/geometry';
+import { clipAlpha } from '../core/timeline';
 import type { Adjust, MediaItem } from '../core/types';
 import { registerItemRenderer, type Ctx2D, type DrawEnv } from './itemRenderers';
 import { addShapePath } from './shapes';
@@ -27,7 +28,11 @@ export function adjustToFilter(a: Adjust, pixelScale: number): string {
 export function drawMediaItem(ctx: Ctx2D, it: MediaItem, env: DrawEnv, source: CanvasImageSource | null, sourceW: number, sourceH: number): void {
   const { w, h } = itemSize(it);
   if (w <= 0 || h <= 0 || it.crop.w <= 0 || it.crop.h <= 0) return;
+  // 不透明度・フェード（動画モードのクリップ）
+  const alpha = clipAlpha(it, env.clipTimes?.get(it.id));
+  if (alpha <= 0) return;
   ctx.save();
+  if (alpha < 1) ctx.globalAlpha *= alpha;
   ctx.translate(it.cx, it.cy);
   if (it.rotation) ctx.rotate(it.rotation * DEG);
   if (it.flipX || it.flipY) ctx.scale(it.flipX ? -1 : 1, it.flipY ? -1 : 1);
@@ -65,9 +70,9 @@ registerItemRenderer('image', {
 
 registerItemRenderer('video', {
   draw(ctx, it, env) {
-    const t = env.videoTimes?.get(it.id);
-    if (t === undefined) return;
-    const f = env.frames?.frameFor(it, t) ?? null;
+    const ct = env.clipTimes?.get(it.id);
+    if (ct === undefined) return;
+    const f = env.frames?.frameFor(it, ct.source) ?? null;
     drawMediaItem(ctx, it, env, f?.image ?? null, f?.width ?? it.srcWidth, f?.height ?? it.srcHeight);
   },
 });

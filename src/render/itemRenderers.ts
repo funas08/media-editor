@@ -2,6 +2,7 @@
 // テキストや図形を追加するときは、新しい型を core/types.ts に足して registerItemRenderer で登録する。
 
 import type { AssetStore } from '../core/AssetStore';
+import type { ClipTime } from '../core/timeline';
 import type { Item, ItemType, VideoItem } from '../core/types';
 
 /** Canvas 2D の描画先（表示用・書き出し用の両方） */
@@ -27,8 +28,8 @@ export interface DrawEnv {
   pixelated?: boolean;
   /** 描く時刻（秒）。動画モードの再生位置 */
   time?: number;
-  /** 時刻 time に表示する動画クリップ ID → 元動画での時刻（drawScene が計算する） */
-  videoTimes?: Map<string, number>;
+  /** 時刻 time に表示するクリップ ID → 時刻情報（drawScene が計算する） */
+  clipTimes?: Map<string, ClipTime>;
   /** 動画のフレーム */
   frames?: VideoFrameProvider;
 }

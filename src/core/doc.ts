@@ -1,6 +1,6 @@
 // ドキュメント・アイテムの生成と小さなユーティリティ
 
-import type { Adjust, CropShape, DocState, ImageItem, Item, MediaItem, MediaItemBase, Rect, VideoItem } from './types';
+import { MAIN_TRACK, type Adjust, type ClipTiming, type CropShape, type DocState, type ImageItem, type Item, type MediaItem, type MediaItemBase, type Rect, type VideoItem } from './types';
 
 export const DEFAULT_ADJUST: Readonly<Adjust> = {
   brightness: 100,
@@ -22,6 +22,7 @@ export function createDoc(width = 2560, height = 1440): DocState {
     version: 1,
     canvas: { width, height, background: '#ffffff', transparent: false, shape: { ...DEFAULT_CROP_SHAPE } },
     items: [],
+    timeline: { overlays: [], music: [] },
   };
 }
 
@@ -61,6 +62,16 @@ export function createImageItem(src: ImageSource, cx: number, cy: number, scale 
  * - cropShape がない画像、shape がないキャンバスは四角形として扱う
  */
 export function normalizeDoc(doc: DocState): DocState {
+  // タイムラインがない（V1 以前）・動画クリップに配置がない → メイントラック
+  if (!doc.timeline) doc.timeline = { overlays: [], music: [] };
+  doc.timeline.overlays ??= [];
+  doc.timeline.music ??= [];
+  for (const it of doc.items) {
+    if (it.type === 'video') {
+      it.srcDuration ??= it.outPoint;
+      it.clip ??= newClipTiming(MAIN_TRACK, 0, it.outPoint - it.inPoint);
+    }
+  }
   const cs = (doc.canvas as Partial<DocState['canvas']>).shape;
   if (!cs || !['rect', 'roundRect', 'ellipse'].includes(cs.kind)) doc.canvas.shape = { ...DEFAULT_CROP_SHAPE };
   else if (typeof cs.radius !== 'number') cs.radius = DEFAULT_CROP_SHAPE.radius;
@@ -117,8 +128,17 @@ export function createVideoItem(src: VideoSource, cx: number, cy: number, scale 
     speed: 1,
     volume: 1,
     muted: false,
+    clip: newClipTiming(MAIN_TRACK, 0, src.duration),
   };
 }
+
+/** タイムライン上の配置の初期値 */
+export function newClipTiming(track: string, start: number, duration: number): ClipTiming {
+  return { track, start, duration, opacity: 1, fadeIn: 0, fadeOut: 0 };
+}
+
+/** 静止画クリップの既定の長さ（秒） */
+export const DEFAULT_STILL_DURATION = 5;
 
 /** 画像の「ユーザー指定の範囲」（なければ元画像全体） */
 export function baseCrop(it: MediaItem): Rect {

@@ -11,7 +11,10 @@ import { SequentialFrames } from './SequentialFrames';
 const PREVIEW_MAX_SIDE = 1280;
 
 interface State {
+  mediaId: string;
   seq: SequentialFrames;
+  /** 最後に使った時刻（しばらく使わないデコーダーは止める） */
+  usedAt: number;
   last: WrappedCanvas | null;
   /** 次に取りにいく時刻（null なら依頼なし） */
   wanted: number | null;
@@ -29,28 +32,44 @@ export class PreviewFrames implements VideoFrameProvider {
   }
 
   frameFor(item: VideoItem, sourceTime: number): FrameImage | null {
-    const st = this.state(item.mediaId);
+    // デコーダーはクリップごと（同じ動画をメインとオーバーレイに置いても、それぞれの位置を表示できる）
+    const st = this.state(item.id, item.mediaId);
     if (!st) return null;
+    st.usedAt = performance.now();
+    this.sweep();
     st.wanted = sourceTime;
     if (!st.busy) void this.pump(st);
     const c = st.last?.canvas;
     return c ? { image: c, width: c.width, height: c.height } : null;
   }
 
-  /** 使わなくなった動画のデコーダーを止める */
-  retainOnly(ids: ReadonlySet<string>): void {
-    for (const [id, st] of this.states) {
-      if (ids.has(id)) continue;
+  /** 指定した動画（mediaId）以外のデコーダーを止める */
+  retainOnly(mediaIds: ReadonlySet<string>): void {
+    for (const [key, st] of this.states) {
+      if (mediaIds.has(st.mediaId)) continue;
       void st.seq.dispose();
-      this.states.delete(id);
+      this.states.delete(key);
     }
   }
 
-  private state(mediaId: string): State | null {
-    const existing = this.states.get(mediaId);
+  private lastSweep = 0;
+  /** 5 秒以上使っていないデコーダーを止める（メモリ対策） */
+  private sweep(): void {
+    const now = performance.now();
+    if (now - this.lastSweep < 1000) return;
+    this.lastSweep = now;
+    for (const [key, st] of this.states) {
+      if (now - st.usedAt < 5000 || st.busy) continue;
+      void st.seq.dispose();
+      this.states.delete(key);
+    }
+  }
+
+  private state(key: string, mediaId: string): State | null {
+    const existing = this.states.get(key);
     if (existing) return existing;
     const entry = this.media.get(mediaId);
-    if (!entry) return null;
+    if (!entry?.video) return null;
     const { width, height } = entry.info;
     const k = Math.min(1, PREVIEW_MAX_SIDE / Math.max(width, height));
     const sink = new CanvasSink(entry.video, {
@@ -59,8 +78,8 @@ export class PreviewFrames implements VideoFrameProvider {
       fit: 'fill',
       poolSize: 4,
     });
-    const st: State = { seq: new SequentialFrames(sink), last: null, wanted: null, busy: false };
-    this.states.set(mediaId, st);
+    const st: State = { mediaId, seq: new SequentialFrames(sink), usedAt: performance.now(), last: null, wanted: null, busy: false };
+    this.states.set(key, st);
     return st;
   }
 

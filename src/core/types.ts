@@ -37,6 +37,54 @@ export interface CropShape {
   radius: number;
 }
 
+/** メイン動画トラックの ID */
+export const MAIN_TRACK = 'main';
+
+/**
+ * タイムライン上の配置（動画モード）。これがないアイテムは時刻に関係なく常に表示する（画像モードの作品）
+ */
+export interface ClipTiming {
+  /** 置いているトラック：MAIN_TRACK またはオーバーレイトラックの ID */
+  track: string;
+  /** 開始時刻（秒）。オーバーレイのみ。メインは並び順で決まるので使わない */
+  start: number;
+  /** 表示時間（秒）。画像のみ。動画は使う範囲と再生速度で決まる */
+  duration: number;
+  /** 不透明度（0〜1） */
+  opacity: number;
+  /** フェードイン・フェードアウトの秒数 */
+  fadeIn: number;
+  fadeOut: number;
+}
+
+/** オーバーレイトラック（画像・動画を好きな時刻に置ける） */
+export interface OverlayTrack {
+  id: string;
+  visible: boolean;
+  locked: boolean;
+}
+
+/** 音楽クリップ（音楽トラック） */
+export interface MusicClip {
+  id: string;
+  mediaId: string;
+  name: string;
+  /** タイムライン上の開始時刻（秒） */
+  start: number;
+  /** 元の音声で使う範囲（秒） */
+  inPoint: number;
+  outPoint: number;
+  /** 元の音声の長さ（秒） */
+  srcDuration: number;
+  volume: number;
+}
+
+export interface TimelineState {
+  /** オーバーレイトラック（先頭が一番上＝手前） */
+  overlays: OverlayTrack[];
+  music: MusicClip[];
+}
+
 /** すべてのアイテムに共通の属性 */
 export interface ItemBase {
   id: string;
@@ -52,6 +100,8 @@ export interface ItemBase {
   rotation: number;
   flipX: boolean;
   flipY: boolean;
+  /** タイムライン上の配置（動画モード）。なければ常に表示 */
+  clip?: ClipTiming;
 }
 
 /** 画像・動画に共通の属性（変形・切り抜き・色調補正。画像モードのツールをそのまま使えるようにする） */
@@ -120,6 +170,8 @@ export interface CanvasSettings {
 export interface DocState {
   version: 1;
   canvas: CanvasSettings;
-  /** 配列の先頭が一番下のレイヤー */
+  /** 配列の先頭が一番下のレイヤー（動画モードで clip を持つアイテムはトラックの順で描く） */
   items: Item[];
+  /** 動画モードのタイムライン */
+  timeline: TimelineState;
 }
