@@ -87,6 +87,8 @@ export interface CanvasSettings {
   background: string;
   /** true のとき背景は透明 */
   transparent: boolean;
+  /** キャンバスの形（角丸・楕円のときは形の外側が透明になる） */
+  shape: CropShape;
 }
 
 export interface DocState {

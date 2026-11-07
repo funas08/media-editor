@@ -37,6 +37,15 @@ export class AssetStore {
     return [...this.assets.values()];
   }
 
+  /** 指定した ID 以外を解放する（新しいドキュメントにしたとき、使わなくなった画像のメモリを空ける） */
+  retainOnly(ids: ReadonlySet<string>): void {
+    for (const [id, a] of this.assets) {
+      if (ids.has(id)) continue;
+      a.bitmap.close();
+      this.assets.delete(id);
+    }
+  }
+
   clear(): void {
     for (const a of this.assets.values()) a.bitmap.close();
     this.assets.clear();

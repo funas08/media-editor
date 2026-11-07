@@ -20,7 +20,7 @@ export function newId(prefix = 'it'): string {
 export function createDoc(width = 2560, height = 1440): DocState {
   return {
     version: 1,
-    canvas: { width, height, background: '#ffffff', transparent: false },
+    canvas: { width, height, background: '#ffffff', transparent: false, shape: { ...DEFAULT_CROP_SHAPE } },
     items: [],
   };
 }
@@ -58,9 +58,12 @@ export function createImageItem(src: ImageSource, cx: number, cy: number, scale 
 
 /**
  * 古い形式のドキュメントを今の形式にそろえる（プロジェクト読み込み時）。
- * - cropShape がない画像は四角形として扱う
+ * - cropShape がない画像、shape がないキャンバスは四角形として扱う
  */
 export function normalizeDoc(doc: DocState): DocState {
+  const cs = (doc.canvas as Partial<DocState['canvas']>).shape;
+  if (!cs || !['rect', 'roundRect', 'ellipse'].includes(cs.kind)) doc.canvas.shape = { ...DEFAULT_CROP_SHAPE };
+  else if (typeof cs.radius !== 'number') cs.radius = DEFAULT_CROP_SHAPE.radius;
   for (const it of doc.items) {
     if (it.type !== 'image') continue;
     const shape = (it as Partial<ImageItem>).cropShape;

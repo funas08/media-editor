@@ -6,6 +6,7 @@ import { h } from './controls';
 import { icons } from './icons';
 
 export interface TopBarActions {
+  newDoc(): void;
   addImages(): void;
   open(): void;
   save(): void;
@@ -52,8 +53,9 @@ export class TopBar {
       h(
         'div',
         { class: 'tb-group' },
-        barButton(icons.imagePlus, '画像を追加', '画像を追加（複数可）', a.addImages),
-        barButton(icons.open, '開く', '画像として開く（キャンバスを画像のサイズにする）／プロジェクト（.json）を開く（Ctrl+O）', a.open),
+        barButton(icons.newDoc, '新規作成', '新規作成：画像を開く／白紙から作成／プロジェクトを開く（Alt+N）', a.newDoc),
+        barButton(icons.open, '開く', '画像を開く（新しいドキュメント。キャンバスが画像のサイズになる）／プロジェクト（.json）を開く（Ctrl+O）', a.open),
+        barButton(icons.imagePlus, '画像を追加', '今のキャンバスに画像を追加（複数可。ドロップ・Ctrl+V でも追加できます）', a.addImages),
         this.saveBtn,
         barButton(icons.export, '書き出し', '画像として書き出す：形式・品質・倍率を選択（Ctrl+Shift+E）', a.exportImage),
       ),

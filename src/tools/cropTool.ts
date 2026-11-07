@@ -1,21 +1,41 @@
 // トリミング(C)
-// 選択中の画像に切り抜き枠を表示。切り抜かれる部分も薄く表示し、切り抜かれる形（四角形・角丸・楕円）をプレビュー。
-// 8方向ハンドルで範囲変更（Shift：縦横比固定、Alt：中心固定、Shift+Alt：両方）、枠の内側ドラッグで中身をずらす。
-// 三分割線を表示。Enter / Esc で確定。範囲は元画像のピクセル座標で扱う（非破壊）。
+// 対象は「キャンバス」（既定）と「選択中の画像」。枠の操作・形・比率・プリセット・修飾キーは共通。
+//
+// - 画像：範囲は元画像のピクセル座標。枠の内側ドラッグで中身をずらす。元画像の外には広げられない
+// - キャンバス：範囲はキャンバス座標。枠の内側ドラッグで枠が動く。キャンバスの外まで広げられる（背景色になる）。
+//   確定するとキャンバスのサイズが枠の大きさになり、全画像が枠に合わせてずれる。角丸・楕円はキャンバスの形として保存
+//
+// 共通：8方向ハンドル（Shift：縦横比固定（自由なら 1:1）、Alt：中心固定、Shift+Alt：両方）、三分割線、Enter / Esc で確定
 
 import { DEFAULT_CROP_SHAPE } from '../core/doc';
 import type { CropShape, CropShapeKind, ImageItem, Point, Rect } from '../core/types';
-import { clampRect, docToSource, fitAspect, fullRect, isFullRect, maxCenteredRect, resizeCropRect, sourceToDoc, withCrop } from '../features/crop';
+import {
+  applyCanvasCrop,
+  clampRect,
+  clampRectTo,
+  docToSource,
+  fitAspectTo,
+  fullRect,
+  isFullRect,
+  maxCenteredRect,
+  resizeCropRect,
+  sourceToDoc,
+  withCrop,
+  type CropBounds,
+} from '../features/crop';
 import { ACCENT, drawHandle, drawLabel, drawLine, drawSourceGhost, strokePolygon, strokeShape } from '../render/overlay';
+import { addShapePath } from '../render/shapes';
 import { button, group, h, hint, numberInput, row, segmented, selectInput, slider, text } from '../ui/controls';
 import { icons } from '../ui/icons';
 import { HANDLE_DIRS, hitHandle, resizeCursor, selectAt, singleEditable } from './common';
 import { registerTool } from './registry';
 import type { ToolHost } from './Tool';
 
+type Target = 'canvas' | 'image';
 type RatioId = 'free' | 'orig' | '1:1' | '4:3' | '3:2' | '16:9' | '9:16' | 'custom';
 
-interface Session {
+interface ImageSession {
+  kind: 'image';
   id: string;
   /** 開始時のアイテムの状態（外から変更されたかの判定用） */
   baseJson: string;
@@ -23,19 +43,32 @@ interface Session {
   orig: ImageItem;
   /** 切り抜き範囲（元画像の座標） */
   rect: Rect;
-  /** 切り抜きの形 */
   shape: CropShape;
 }
 
-type Drag = { kind: 'handle'; hx: number; hy: number; r0: Rect } | { kind: 'move'; start: Point; r0: Rect; orig0: ImageItem };
+interface CanvasSession {
+  kind: 'canvas';
+  /** 開始時のキャンバスの状態（外から変更されたかの判定用） */
+  baseJson: string;
+  /** 枠（キャンバス座標。キャンバスの外にはみ出してもよい） */
+  rect: Rect;
+  shape: CropShape;
+}
+
+type Session = ImageSession | CanvasSession;
+
+type Drag =
+  | { kind: 'handle'; hx: number; hy: number; r0: Rect }
+  | { kind: 'moveContent'; start: Point; r0: Rect; orig0: ImageItem }
+  | { kind: 'moveFrame'; start: Point; r0: Rect };
 
 let session: Session | null = null;
 let drag: Drag | null = null;
 let unsubscribe: (() => void) | null = null;
 /** 自分で確定した変更を、外からの変更（Undo など）と区別するためのフラグ */
 let confirming = false;
-/** 比率の設定（ツールを切り替えても保持） */
-const st = { ratio: 'free' as RatioId, customW: 1, customH: 1 };
+/** 設定（比率はツールを切り替えても保持。対象はツールを開くたびに決まる） */
+const st = { target: 'canvas' as Target, ratio: 'free' as RatioId, customW: 1, customH: 1 };
 
 const RATIOS: Record<Exclude<RatioId, 'free' | 'orig' | 'custom'>, number> = {
   '1:1': 1,
@@ -45,66 +78,101 @@ const RATIOS: Record<Exclude<RatioId, 'free' | 'orig' | 'custom'>, number> = {
   '9:16': 9 / 16,
 };
 
-/** 表示上の縦横比を、元画像の座標での縦横比に直す（縦横の拡大率が違う画像のため） */
-function toSourceAspect(displayAspect: number, it: ImageItem): number {
-  return (displayAspect * it.scaleY) / it.scaleX;
+// ===== 対象ごとの違いをまとめた小さな関数 =====
+
+/** 枠の座標 → キャンバス座標 */
+function toDoc(s: Session, u: number, v: number): Point {
+  return s.kind === 'image' ? sourceToDoc(s.orig, u, v) : { x: u, y: v };
 }
 
-/** 設定中の比率（元画像の座標での 幅/高さ）。自由なら null */
-function aspectValue(s: Session): number | null {
+/** キャンバス座標 → 枠の座標 */
+function fromDoc(s: Session, p: Point): Point {
+  return s.kind === 'image' ? docToSource(s.orig, p) : p;
+}
+
+/** 範囲の制限（画像は元画像の中だけ、キャンバスは制限なし） */
+function boundsOf(s: Session): CropBounds {
+  return s.kind === 'image' ? { W: s.orig.srcWidth, H: s.orig.srcHeight } : null;
+}
+
+/** 枠の 1px がキャンバス上で何 px か */
+function scaleOf(s: Session): { x: number; y: number } {
+  return s.kind === 'image' ? { x: s.orig.scaleX, y: s.orig.scaleY } : { x: 1, y: 1 };
+}
+
+/** 表示上の縦横比を、枠の座標での縦横比に直す（縦横の拡大率が違う画像のため） */
+function toFrameAspect(displayAspect: number, s: Session): number {
+  const k = scaleOf(s);
+  return (displayAspect * k.y) / k.x;
+}
+
+/** 設定中の比率（枠の座標での 幅/高さ）。自由なら null */
+function aspectValue(s: Session, host: ToolHost): number | null {
   switch (st.ratio) {
     case 'free':
       return null;
     case 'orig':
-      return s.orig.srcWidth / s.orig.srcHeight;
+      return s.kind === 'image' ? s.orig.srcWidth / s.orig.srcHeight : host.editor.doc.canvas.width / host.editor.doc.canvas.height;
     case 'custom':
-      return st.customW > 0 && st.customH > 0 ? toSourceAspect(st.customW / st.customH, s.orig) : null;
+      return st.customW > 0 && st.customH > 0 ? toFrameAspect(st.customW / st.customH, s) : null;
     default:
-      return toSourceAspect(RATIOS[st.ratio], s.orig);
+      return toFrameAspect(RATIOS[st.ratio], s);
   }
 }
 
-function applyRatio(): void {
+function applyRatio(host: ToolHost): void {
   if (!session) return;
-  const a = aspectValue(session);
-  if (a) session.rect = fitAspect(session.rect, a, session.orig.srcWidth, session.orig.srcHeight);
+  const a = aspectValue(session, host);
+  if (a) session.rect = fitAspectTo(session.rect, a, boundsOf(session));
 }
+
+// ===== 開始・確定・取り消し =====
 
 function start(host: ToolHost): void {
-  const it = singleEditable(host);
-  if (!it || it.type !== 'image') {
-    session = null;
-    return;
+  const { editor } = host;
+  if (st.target === 'canvas') {
+    const c = editor.doc.canvas;
+    session = { kind: 'canvas', baseJson: JSON.stringify(c), rect: { x: 0, y: 0, w: c.width, h: c.height }, shape: { ...c.shape } };
+  } else {
+    const it = singleEditable(host);
+    session =
+      it && it.type === 'image'
+        ? { kind: 'image', id: it.id, baseJson: JSON.stringify(it), orig: structuredClone(it), rect: { ...it.crop }, shape: { ...it.cropShape } }
+        : null;
   }
-  session = {
-    id: it.id,
-    baseJson: JSON.stringify(it),
-    orig: structuredClone(it),
-    rect: { ...it.crop },
-    shape: { ...(it.cropShape ?? DEFAULT_CROP_SHAPE) },
-  };
-  applyRatio();
+  applyRatio(host);
   host.requestRender();
 }
 
-/** 確定して履歴に残す */
+/** 外から変更されていたら作り直す（Undo など） */
+function isStale(host: ToolHost, s: Session): boolean {
+  if (s.kind === 'canvas') return JSON.stringify(host.editor.doc.canvas) !== s.baseJson;
+  const cur = host.editor.doc.items.find((x) => x.id === s.id);
+  return !cur || JSON.stringify(cur) !== s.baseJson;
+}
+
+/** 確定して履歴に残す（1回分） */
 function confirm(host: ToolHost): void {
   const s = session;
   if (!s) return;
   session = null;
   drag = null;
-  const result = withCrop(s.orig, s.rect);
-  const full = isFullRect(s.orig, s.rect);
   confirming = true;
-  host.editor.update('トリミング', (d) => {
-    const it = d.items.find((x) => x.id === s.id);
-    if (!it || it.type !== 'image') return;
-    it.crop = { ...s.rect };
-    it.userCrop = full ? null : { ...s.rect };
-    it.cropShape = { ...s.shape };
-    it.cx = result.cx;
-    it.cy = result.cy;
-  });
+  if (s.kind === 'image') {
+    const result = withCrop(s.orig, s.rect);
+    const full = isFullRect(s.orig, s.rect);
+    host.editor.update('トリミング', (d) => {
+      const it = d.items.find((x) => x.id === s.id);
+      if (!it || it.type !== 'image') return;
+      it.crop = { ...s.rect };
+      it.userCrop = full ? null : { ...s.rect };
+      it.cropShape = { ...s.shape };
+      it.cx = result.cx;
+      it.cy = result.cy;
+    });
+  } else {
+    host.editor.update('キャンバスのトリミング', (d) => applyCanvasCrop(d, s.rect, s.shape));
+  }
   confirming = false;
 }
 
@@ -114,7 +182,17 @@ function cancel(host: ToolHost): void {
   host.requestRender();
 }
 
-/** 枠の四隅（画面座標） */
+/** 対象を切り替える（今の枠は確定してから） */
+function setTarget(host: ToolHost, t: Target): void {
+  if (st.target === t && session) return;
+  confirm(host);
+  st.target = t;
+  start(host);
+  host.refreshUI();
+}
+
+// ===== 画面座標での枠 =====
+
 function frameScreen(host: ToolHost, s: Session): Point[] {
   const r = s.rect;
   return [
@@ -122,22 +200,22 @@ function frameScreen(host: ToolHost, s: Session): Point[] {
     [r.x + r.w, r.y],
     [r.x + r.w, r.y + r.h],
     [r.x, r.y + r.h],
-  ].map(([u, v]) => host.view.docToScreen(sourceToDoc(s.orig, u, v)));
+  ].map(([u, v]) => host.view.docToScreen(toDoc(s, u, v)));
 }
 
 function handlesScreen(host: ToolHost, s: Session): Point[] {
   const r = s.rect;
-  return HANDLE_DIRS.map((d) => host.view.docToScreen(sourceToDoc(s.orig, r.x + ((d.hx + 1) / 2) * r.w, r.y + ((d.hy + 1) / 2) * r.h)));
+  return HANDLE_DIRS.map((d) => host.view.docToScreen(toDoc(s, r.x + ((d.hx + 1) / 2) * r.w, r.y + ((d.hy + 1) / 2) * r.h)));
 }
 
 function insideRect(s: Session, p: Point): boolean {
-  const q = docToSource(s.orig, p);
+  const q = fromDoc(s, p);
   const r = s.rect;
   return q.x >= r.x && q.x <= r.x + r.w && q.y >= r.y && q.y <= r.y + r.h;
 }
 
-/** ハンドルのカーソル（元画像の向きを画面の向きに直して判定） */
 function cursorFor(s: Session, hx: number, hy: number): string {
+  if (s.kind === 'canvas') return resizeCursor(hx, hy, 0);
   const o = s.orig;
   return resizeCursor(o.flipX ? -hx : hx, o.flipY ? -hy : hy, o.rotation);
 }
@@ -150,24 +228,23 @@ registerTool({
   order: 20,
   cursor: 'default',
 
-  activate(host) {
+  activate(host, opts) {
+    // ツールを選んだときはキャンバス。選択・移動ツールのダブルクリックから来たときは画像
+    st.target = opts?.target === 'image' ? 'image' : 'canvas';
     start(host);
-    // 選択が変わったら対象を切り替え、Undo などで対象の画像が外から変わったら作り直す
     unsubscribe = host.editor.changed.on((ev) => {
       if (confirming) return;
-      if (ev.history && session) {
-        const s = session;
-        const cur = host.editor.doc.items.find((x) => x.id === s.id);
-        if (!cur || JSON.stringify(cur) !== s.baseJson) {
-          session = null;
-          start(host);
-          return;
-        }
+      if (ev.history && session && isStale(host, session)) {
+        session = null;
+        start(host);
+        return;
       }
-      if (ev.selection) {
-        if (session && !host.editor.selection.includes(session.id)) confirm(host);
+      // 画像が対象のときだけ、選択の変化で対象の画像を切り替える
+      if (ev.selection && st.target === 'image') {
+        if (session?.kind === 'image' && !host.editor.selection.includes(session.id)) confirm(host);
         if (!session) start(host);
       }
+      if (!session && st.target === 'canvas') start(host);
     });
   },
 
@@ -180,13 +257,18 @@ registerTool({
 
   getPreview(doc) {
     const s = session;
-    if (!s) return null;
+    if (!s || s.kind !== 'image') return null;
     if (!doc.items.some((it) => it.id === s.id)) {
       session = null;
       return null;
     }
     const preview: ImageItem = { ...withCrop(s.orig, s.rect), cropShape: { ...s.shape } };
     return { ...doc, items: doc.items.map((it) => (it.id === s.id ? preview : it)) };
+  },
+
+  getCanvasArea() {
+    const s = session;
+    return s && s.kind === 'canvas' ? { ...s.rect, shape: s.shape } : null;
   },
 
   onPointerDown(e, host) {
@@ -198,14 +280,20 @@ registerTool({
         return;
       }
       if (insideRect(s, e.doc)) {
-        drag = { kind: 'move', start: e.doc, r0: { ...s.rect }, orig0: structuredClone(s.orig) };
+        drag =
+          s.kind === 'image'
+            ? { kind: 'moveContent', start: e.doc, r0: { ...s.rect }, orig0: structuredClone(s.orig) }
+            : { kind: 'moveFrame', start: e.doc, r0: { ...s.rect } };
         return;
       }
-      // 枠の外をクリック：確定してから、クリックした画像を選ぶ（選択の変化で新しい枠が始まる）
+      if (s.kind === 'canvas') return;
+      // 画像が対象で枠の外をクリック：確定してから、クリックした画像を選ぶ
       confirm(host);
     }
-    selectAt(e, host);
-    if (!session) start(host);
+    if (st.target === 'image') {
+      selectAt(e, host);
+      if (!session) start(host);
+    }
   },
 
   onPointerMove(e, host) {
@@ -217,19 +305,21 @@ registerTool({
       else host.setCursor(insideRect(s, e.doc) ? 'move' : null);
       return;
     }
-    const W = s.orig.srcWidth;
-    const H = s.orig.srcHeight;
+    const bounds = boundsOf(s);
     if (drag.kind === 'handle') {
-      const q = docToSource(s.orig, e.doc);
+      const q = fromDoc(s, e.doc);
       // Shift：縦横比を固定（自由のときは 1:1）／ Alt：中心を固定
-      const aspect = aspectValue(s) ?? (e.shift ? toSourceAspect(1, s.orig) : null);
-      s.rect = resizeCropRect(drag.r0, drag.hx, drag.hy, q.x, q.y, { aspect, fromCenter: e.alt }, W, H);
-    } else {
-      // 中身をずらす：枠は画面上で止めたまま、画像をポインターに合わせて動かす
+      const aspect = aspectValue(s, host) ?? (e.shift ? toFrameAspect(1, s) : null);
+      s.rect = resizeCropRect(drag.r0, drag.hx, drag.hy, q.x, q.y, { aspect, fromCenter: e.alt, unbounded: !bounds }, bounds?.W ?? 0, bounds?.H ?? 0);
+    } else if (drag.kind === 'moveFrame') {
+      // 枠そのものを動かす（キャンバス）
+      s.rect = { ...drag.r0, x: Math.round(drag.r0.x + e.doc.x - drag.start.x), y: Math.round(drag.r0.y + e.doc.y - drag.start.y) };
+    } else if (s.kind === 'image') {
+      // 中身をずらす（画像）：枠は画面上で止めたまま、画像をポインターに合わせて動かす
       const o0 = drag.orig0;
       const a = docToSource(o0, drag.start);
       const b = docToSource(o0, e.doc);
-      const r = clampRect({ ...drag.r0, x: drag.r0.x - (b.x - a.x), y: drag.r0.y - (b.y - a.y) }, W, H);
+      const r = clampRect({ ...drag.r0, x: drag.r0.x - (b.x - a.x), y: drag.r0.y - (b.y - a.y) }, o0.srcWidth, o0.srcHeight);
       const du = { x: drag.r0.x - r.x, y: drag.r0.y - r.y };
       const p0 = sourceToDoc(o0, 0, 0);
       const p1 = sourceToDoc(o0, du.x, du.y);
@@ -245,22 +335,34 @@ registerTool({
   },
 
   onDoubleClick(e, host) {
-    // 枠の外の画像をダブルクリックしたら、その画像のトリミングを始める
-    if (session && insideRect(session, e.doc)) return;
+    const s = session;
+    if (s && insideRect(s, e.doc) && s.kind === 'image') return;
+    // キャンバスが対象のときに画像をダブルクリック → その画像のトリミングに切り替え
+    if (st.target === 'canvas') {
+      const hit = host.editor.doc.items.slice().reverse().find((it) => it.visible && !it.locked && it.type === 'image' && insideItem(it, e.doc));
+      if (!hit) return;
+      confirm(host);
+      host.editor.setSelection([hit.id]);
+      setTarget(host, 'image');
+      return;
+    }
     selectAt(e, host);
   },
 
   onKeyDown(e, host) {
     if (!session) return false;
     if (e.key === 'Enter' || e.key === 'Escape') {
+      const kind = session.kind;
       confirm(host);
-      host.toast('トリミングを確定しました');
+      if (kind === 'canvas') start(host);
+      host.toast(kind === 'canvas' ? 'キャンバスをトリミングしました' : 'トリミングを確定しました');
       return true;
     }
-    // トリミング中の Ctrl+Z は、確定前の変更を取り消す
-    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ' && !e.shiftKey) {
+    // トリミング中の Ctrl+Z は、確定前の変更を取り消す（確定前の変更がなければ通常の元に戻す）
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ' && !e.shiftKey && hasPendingChange(host)) {
       cancel(host);
-      host.toast('トリミングを取り消しました');
+      start(host);
+      host.toast('トリミングの変更を取り消しました');
       return true;
     }
     return false;
@@ -269,20 +371,34 @@ registerTool({
   drawOverlay(ctx, host) {
     const s = session;
     if (!s) return;
-    const asset = host.editor.assets.get(s.orig.assetId);
-    if (asset) drawSourceGhost(ctx, host.view, s.orig, asset.bitmap, s.rect, s.shape);
+    const { view } = host;
+    if (s.kind === 'image') {
+      const asset = host.editor.assets.get(s.orig.assetId);
+      if (asset) drawSourceGhost(ctx, view, s.orig, asset.bitmap, s.rect, s.shape);
+    }
+    const k = scaleOf(s);
+    const rot = s.kind === 'image' ? s.orig.rotation : 0;
+    const c = view.docToScreen(toDoc(s, s.rect.x + s.rect.w / 2, s.rect.y + s.rect.h / 2));
+    const w = s.rect.w * k.x * view.zoom;
+    const hh = s.rect.h * k.y * view.zoom;
+    if (s.kind === 'canvas') {
+      // 枠の外側を暗くする
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(-1e5, -1e5, 2e5, 2e5);
+      addShapePath(ctx, s.shape, c.x, c.y, w, hh);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fill('evenodd');
+      ctx.restore();
+    }
     const pts = frameScreen(host, s);
     // 外接する四角形（ハンドルの枠）
     strokePolygon(ctx, pts, '#ffffff', 1.5);
     strokePolygon(ctx, pts, ACCENT, 1, [5, 4]);
     // 切り抜かれる形
     if (s.shape.kind !== 'rect') {
-      const c = host.view.docToScreen(sourceToDoc(s.orig, s.rect.x + s.rect.w / 2, s.rect.y + s.rect.h / 2));
-      const z = host.view.zoom;
-      const w = s.rect.w * s.orig.scaleX * z;
-      const hh = s.rect.h * s.orig.scaleY * z;
-      strokeShape(ctx, s.shape, c, w, hh, s.orig.rotation, '#ffffff', 2);
-      strokeShape(ctx, s.shape, c, w, hh, s.orig.rotation, ACCENT, 1);
+      strokeShape(ctx, s.shape, c, w, hh, rot, '#ffffff', 2);
+      strokeShape(ctx, s.shape, c, w, hh, rot, ACCENT, 1);
     }
     // 三分割線
     const lerp = (a: Point, b: Point, t: number) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
@@ -297,6 +413,16 @@ registerTool({
 
   createSettings(host) {
     const info = text('', 'value strong');
+
+    // 対象
+    const targetSeg = segmented<Target>(
+      [
+        { value: 'canvas', label: 'キャンバス', title: 'キャンバス全体を切り抜く' },
+        { value: 'image', label: '選択中の画像', title: '選択中の画像1枚を切り抜く' },
+      ],
+      st.target,
+      (v) => setTarget(host, v),
+    );
 
     // 形
     const shapeSeg = segmented<CropShapeKind>(
@@ -328,7 +454,7 @@ registerTool({
     });
     const radiusWrap = h('div', {}, radius.el);
 
-    // 比率
+    // 比率（キャンバスのときは表示名を変える）
     const ratioSel = selectInput<RatioId>(
       [
         { value: 'free', label: '自由' },
@@ -343,17 +469,21 @@ registerTool({
       st.ratio,
       (v) => {
         st.ratio = v;
-        applyRatio();
+        applyRatio(host);
         refresh();
       },
     );
+    const labels: Record<Target, Partial<Record<RatioId, string>>> = {
+      image: { orig: '元の比率', '16:9': '16:9', '9:16': '9:16（縦長）' },
+      canvas: { orig: '今のキャンバスの比率', '16:9': '16:9（WQHD・4K・FHD）', '9:16': '9:16（各縦向き）' },
+    };
     const customW = numberInput({
       value: st.customW,
       min: 0.01,
       digits: 2,
       onChange: (v) => {
         st.customW = v;
-        applyRatio();
+        applyRatio(host);
         refresh();
       },
     });
@@ -363,70 +493,118 @@ registerTool({
       digits: 2,
       onChange: (v) => {
         st.customH = v;
-        applyRatio();
+        applyRatio(host);
         refresh();
       },
     });
     const customRow = h('div', { class: 'ratio-row' }, customW.el, h('span', { class: 'unit' }, '：'), customH.el);
 
-    // プリセット：形と比率を設定し、画像の中央に最大サイズで配置
+    // プリセット：形と比率を設定し、中央に最大サイズで配置（画像なら元画像、キャンバスならキャンバスの中）
     const preset = (kind: CropShapeKind) => {
       const s = session;
       if (!s) return;
       s.shape.kind = kind;
       st.ratio = '1:1';
-      s.rect = maxCenteredRect(s.orig.srcWidth, s.orig.srcHeight, toSourceAspect(1, s.orig));
+      const a = toFrameAspect(1, s);
+      s.rect =
+        s.kind === 'image'
+          ? maxCenteredRect(s.orig.srcWidth, s.orig.srcHeight, a)
+          : maxCenteredRect(host.editor.doc.canvas.width, host.editor.doc.canvas.height, a);
       refresh();
     };
-    const squareBtn = button('正方形', () => preset('rect'), { title: '四角形・1:1 で画像の中央に最大サイズ' });
-    const circleBtn = button('正円', () => preset('ellipse'), { title: '楕円・1:1 で画像の中央に最大サイズ' });
+    const squareBtn = button('正方形', () => preset('rect'), { title: '四角形・1:1 で中央に最大サイズ' });
+    const circleBtn = button('正円', () => preset('ellipse'), { title: '楕円・1:1 で中央に最大サイズ' });
 
     // 範囲の数値入力
     const setRect = (patch: Partial<Rect>, keep: 'w' | 'h' | null) => {
       const s = session;
       if (!s) return;
       const r = { ...s.rect, ...patch };
-      const a = aspectValue(s);
+      const a = aspectValue(s, host);
       if (a && keep === 'w') r.h = r.w / a;
       if (a && keep === 'h') r.w = r.h * a;
-      s.rect = clampRect(r, s.orig.srcWidth, s.orig.srcHeight);
+      s.rect = clampRectTo(r, boundsOf(s));
       refresh();
     };
-    const xIn = numberInput({ value: 0, min: 0, unit: 'px', onChange: (v) => setRect({ x: v }, null) });
-    const yIn = numberInput({ value: 0, min: 0, unit: 'px', onChange: (v) => setRect({ y: v }, null) });
+    const xIn = numberInput({ value: 0, unit: 'px', onChange: (v) => setRect({ x: v }, null) });
+    const yIn = numberInput({ value: 0, unit: 'px', onChange: (v) => setRect({ y: v }, null) });
     const wIn = numberInput({ value: 0, min: 1, unit: 'px', onChange: (v) => setRect({ w: v }, 'w') });
     const hIn = numberInput({ value: 0, min: 1, unit: 'px', onChange: (v) => setRect({ h: v }, 'h') });
+    const rangeTitle = text('', 'group-title');
 
-    const okBtn = button('確定', () => confirm(host), { primary: true, title: 'Enter / Esc' });
+    const okBtn = button(
+      '確定',
+      () => {
+        const kind = session?.kind;
+        confirm(host);
+        if (kind === 'canvas') start(host);
+        refresh();
+      },
+      { primary: true, title: 'Enter / Esc' },
+    );
     okBtn.classList.add('block');
-    const resetBtn = button('トリミング解除', () => {
-      if (!session) return;
-      session.rect = fullRect(session.orig);
-      session.shape = { ...DEFAULT_CROP_SHAPE };
-      confirm(host);
-      host.toast('トリミングを解除しました');
+    const resetBtn = button('', () => {
+      const s = session;
+      if (!s) return;
+      if (s.kind === 'image') {
+        s.rect = fullRect(s.orig);
+        s.shape = { ...DEFAULT_CROP_SHAPE };
+        confirm(host);
+        host.toast('トリミングを解除しました');
+      } else {
+        // キャンバス：枠を今のキャンバスに戻す（確定はしない）
+        cancel(host);
+        start(host);
+      }
+      refresh();
     });
-    const cancelBtn = button('キャンセル', () => cancel(host), { title: '確定前の変更を取り消す（Ctrl+Z）' });
+    const cancelBtn = button(
+      'キャンセル',
+      () => {
+        cancel(host);
+        if (st.target === 'canvas') start(host);
+        refresh();
+      },
+      { title: '確定前の変更を取り消す（Ctrl+Z）' },
+    );
+    const modeHint = text('', 'hint');
 
     const el = h(
       'div',
       {},
-      group('対象', info.el),
+      group('対象', targetSeg.el, info.el),
       group('形', shapeSeg.el, radiusWrap),
       group('比率', ratioSel.el, customRow),
       group('プリセット', h('div', { class: 'btn-row' }, squareBtn, circleBtn)),
-      group('範囲（元画像のピクセル）', row('X', xIn.el), row('Y', yIn.el), row('幅', wIn.el), row('高さ', hIn.el)),
+      h('div', { class: 'group' }, rangeTitle.el, row('X', xIn.el), row('Y', yIn.el), row('幅', wIn.el), row('高さ', hIn.el)),
       okBtn,
       h('div', { class: 'btn-row' }, resetBtn, cancelBtn),
-      hint('ハンドルで範囲を変更、枠の内側をドラッグすると中身をずらせます。Enter / Esc で確定します。'),
-      hint('Shift＋ハンドル：縦横比を固定（自由のときは 1:1）／ Alt＋ハンドル：中心を固定 ／ Shift＋Alt：両方'),
-      hint('選択・移動ツールで画像をダブルクリックしても開始できます。元画像は残るので、いつでも解除できます。'),
+      modeHint.el,
+      hint('Shift＋ハンドル：縦横比を固定（自由のときは 1:1）／ Alt＋ハンドル：中心を固定 ／ Shift＋Alt：両方。Enter / Esc で確定します。'),
     );
 
     const update = () => {
       const s = session;
-      const target = s ? host.editor.doc.items.find((x) => x.id === s.id) : null;
-      info.set(s && target ? `${target.name}（元 ${s.orig.srcWidth}×${s.orig.srcHeight}）` : '画像を1枚クリックしてください');
+      targetSeg.set(st.target);
+      if (st.target === 'canvas') {
+        const c = host.editor.doc.canvas;
+        info.set(`キャンバス ${c.width}×${c.height}`);
+      } else {
+        const target = s?.kind === 'image' ? host.editor.doc.items.find((x) => x.id === s.id) : null;
+        info.set(s?.kind === 'image' && target ? `${target.name}（元 ${s.orig.srcWidth}×${s.orig.srcHeight}）` : '画像を1枚クリックしてください');
+      }
+      rangeTitle.set(st.target === 'canvas' ? '枠（キャンバスの座標）' : '範囲（元画像のピクセル）');
+      resetBtn.textContent = st.target === 'canvas' ? '枠をリセット' : 'トリミング解除';
+      modeHint.set(
+        st.target === 'canvas'
+          ? '枠の内側をドラッグすると枠が動きます。キャンバスの外まで広げた部分は背景色（透明なら透明）になります。確定すると、キャンバスのサイズが枠の大きさになります。'
+          : '枠の内側をドラッグすると中の画像がずれます。元画像は残るので、いつでも解除できます。',
+      );
+      // 比率の表示名を対象に合わせる
+      for (const opt of ratioSel.el.options) {
+        const label = labels[st.target][opt.value as RatioId];
+        if (label) opt.textContent = label;
+      }
       const inputs = [xIn, yIn, wIn, hIn];
       for (const inp of inputs) inp.input.disabled = !s;
       for (const b of [okBtn, resetBtn, cancelBtn, squareBtn, circleBtn]) b.disabled = !s;
@@ -455,3 +633,22 @@ registerTool({
     return { el, update };
   },
 });
+
+/** 確定前の変更があるか（枠や形を動かしたか） */
+function hasPendingChange(host: ToolHost): boolean {
+  const s = session;
+  if (!s) return false;
+  if (s.kind === 'canvas') {
+    const c = host.editor.doc.canvas;
+    return s.rect.x !== 0 || s.rect.y !== 0 || s.rect.w !== c.width || s.rect.h !== c.height || JSON.stringify(s.shape) !== JSON.stringify(c.shape);
+  }
+  const cur = host.editor.doc.items.find((x) => x.id === s.id);
+  return !cur || cur.type !== 'image' || JSON.stringify([cur.crop, cur.cropShape, cur.cx, cur.cy]) !== JSON.stringify([s.rect, s.shape, s.orig.cx, s.orig.cy]);
+}
+
+/** 点がアイテムの上にあるか（ダブルクリック判定用） */
+function insideItem(it: ImageItem, p: Point): boolean {
+  const q = docToSource(it, p);
+  const c = it.crop;
+  return q.x >= c.x && q.x <= c.x + c.w && q.y >= c.y && q.y <= c.y + c.h;
+}

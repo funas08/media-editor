@@ -172,7 +172,7 @@ registerTool({
     const hit = topItemAt(host.editor.doc.items, e.doc);
     if (!hit || hit.type !== 'image') return;
     host.editor.setSelection([hit.id]);
-    host.setTool('crop');
+    host.setTool('crop', { target: 'image' });
   },
 
   deactivate(host) {

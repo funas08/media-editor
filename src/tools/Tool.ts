@@ -4,6 +4,7 @@
 
 import type { Editor } from '../core/Editor';
 import type { DocState, Point } from '../core/types';
+import type { CanvasArea } from '../render/ViewRenderer';
 import type { View } from '../render/view';
 
 /** ツールから見たアプリ（UI・表示）の機能 */
@@ -16,11 +17,15 @@ export interface ToolHost {
   refreshUI(): void;
   /** 全体表示 */
   fitView(): void;
-  setTool(id: string): void;
+  /** ツールを切り替える。opts はツールの activate にそのまま渡す（例：トリミングの対象） */
+  setTool(id: string, opts?: ToolActivateOptions): void;
   toast(message: string): void;
   /** ツールが一時的にカーソルを変えたいとき（null で既定に戻す） */
   setCursor(cursor: string | null): void;
 }
+
+/** ツールを開くときの指定（ツールごとに意味が決まる） */
+export type ToolActivateOptions = Record<string, unknown>;
 
 export interface ToolPointerEvent {
   /** キャンバス座標 */
@@ -54,7 +59,7 @@ export interface Tool {
   /** キャンバス上の既定カーソル */
   cursor?: string;
 
-  activate?(host: ToolHost): void;
+  activate?(host: ToolHost, opts?: ToolActivateOptions): void;
   deactivate?(host: ToolHost): void;
 
   onPointerDown?(e: ToolPointerEvent, host: ToolHost): void;
@@ -70,6 +75,8 @@ export interface Tool {
   drawOverlay?(ctx: CanvasRenderingContext2D, host: ToolHost): void;
   /** 確定前の結果を表示したいとき、表示用のドキュメントを返す */
   getPreview?(doc: DocState, host: ToolHost): DocState | null;
+  /** キャンバスとして表示する範囲を変えたいとき（キャンバスのトリミングのプレビュー） */
+  getCanvasArea?(doc: DocState, host: ToolHost): CanvasArea | null;
 
   createSettings(host: ToolHost): ToolSettings;
 }

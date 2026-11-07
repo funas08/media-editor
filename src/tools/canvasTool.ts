@@ -1,8 +1,9 @@
 // キャンバス(K)：キャンバスのサイズと背景
 
+import { DEFAULT_CROP_SHAPE } from '../core/doc';
 import { CANVAS_PRESETS, MAX_CANVAS_SIDE, findPreset } from '../features/canvasPresets';
 import { fitCanvasToItems } from '../features/transform';
-import { button, checkbox, group, h, hint, numberInput, row, selectInput, type Choice } from '../ui/controls';
+import { button, checkbox, group, h, hint, numberInput, row, selectInput, text, type Choice } from '../ui/controls';
 import { icons } from '../ui/icons';
 import { registerTool } from './registry';
 import type { ToolHost } from './Tool';
@@ -67,6 +68,12 @@ registerTool({
       { title: '選択した画像がちょうど収まる大きさにする（アイコン用の丸い画像づくりなどに）' },
     );
     fitBtn.classList.add('block-left');
+    const shapeText = text('', 'value');
+    const unshapeBtn = button('形を解除', () =>
+      editor.update('キャンバスの形を解除', (d) => {
+        d.canvas.shape = { ...DEFAULT_CROP_SHAPE };
+      }),
+    );
     const swapBtn = button('縦横を入れ替え', () => setSize(host, editor.doc.canvas.height, editor.doc.canvas.width), { icon: icons.rotateRight });
 
     // 背景色：ドラッグ中はプレビュー、閉じたら1回分として履歴に残す
@@ -89,8 +96,9 @@ registerTool({
       {},
       group('サイズ', presetSel.el, row('幅', widthIn.el), row('高さ', heightIn.el), swapBtn, fitBtn),
       group('背景', row('背景色', color), transparentCb.el),
+      group('形', shapeText.el, unshapeBtn, hint('角丸・楕円の形はトリミングツール（対象：キャンバス）で設定します。形の外側は透明（JPEG では背景色）になります。')),
       hint('サイズを変えても画像の位置はそのままです。並べ直すには「並べる(G)」を使います。'),
-      hint('丸いアイコン画像の作り方：トリミングで「正円」→ 確定 →「キャンバスを選択した画像に合わせる」→「透明」→ PNG で書き出し'),
+      hint('丸いアイコン画像の作り方：トリミング（対象：キャンバス）で「正円」→ 確定 → PNG で書き出し。画像を丸く切り抜いた場合は「キャンバスを選択した画像に合わせる」→「透明」→ PNG'),
     );
 
     const update = () => {
@@ -102,6 +110,9 @@ registerTool({
       color.disabled = c.transparent;
       transparentCb.set(c.transparent);
       fitBtn.disabled = editor.selection.length === 0;
+      const shapeNames = { rect: '四角形', roundRect: `角丸（半径 ${Math.round(c.shape.radius * 100)}%）`, ellipse: '楕円' };
+      shapeText.set(`現在：${shapeNames[c.shape.kind]}`);
+      unshapeBtn.disabled = c.shape.kind === 'rect';
     };
     update();
     return { el, update };

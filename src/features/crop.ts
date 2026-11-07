@@ -3,7 +3,7 @@
 // （元画像のどの点がキャンバスのどこに来るか、という対応を保ったまま crop と中心を変える）。
 
 import { clamp, DEG, toLocal } from '../core/geometry';
-import type { ImageItem, Point, Rect } from '../core/types';
+import type { CropShape, DocState, ImageItem, Point, Rect } from '../core/types';
 
 /** 元画像の座標 (u, v) → キャンバス座標 */
 export function sourceToDoc(it: ImageItem, u: number, v: number): Point {
@@ -61,6 +61,27 @@ export interface ResizeOptions {
   aspect: number | null;
   /** true なら中心を固定して拡大縮小（Alt） */
   fromCenter: boolean;
+  /** true なら範囲の制限なし（キャンバスのトリミング：キャンバスの外まで広げられる） */
+  unbounded?: boolean;
+}
+
+/** 範囲の制限（null = 制限なし） */
+export type CropBounds = { W: number; H: number } | null;
+
+/** 制限内に収める（制限なしなら最小サイズ 1px だけ保証） */
+export function clampRectTo(r: Rect, bounds: CropBounds): Rect {
+  if (bounds) return clampRect(r, bounds.W, bounds.H);
+  return { x: r.x, y: r.y, w: Math.max(1, r.w), h: Math.max(1, r.h) };
+}
+
+/** 中心を保ったまま、指定の縦横比で今の範囲に収まる最大の範囲にする（制限なし対応版） */
+export function fitAspectTo(r: Rect, aspect: number, bounds: CropBounds): Rect {
+  if (bounds) return fitAspect(r, aspect, bounds.W, bounds.H);
+  let w = r.w;
+  let h = r.h;
+  if (w / h > aspect) w = h * aspect;
+  else h = w / aspect;
+  return { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h };
 }
 
 /**
@@ -73,13 +94,18 @@ export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: n
   const { aspect, fromCenter } = opts;
   const cx0 = r0.x + r0.w / 2;
   const cy0 = r0.y + r0.h / 2;
+  // 範囲の制限（制限なしなら ±∞）
+  const loX = opts.unbounded ? -Infinity : 0;
+  const loY = opts.unbounded ? -Infinity : 0;
+  const hiX = opts.unbounded ? Infinity : W;
+  const hiY = opts.unbounded ? Infinity : H;
 
   if (fromCenter) {
     let w = hx !== 0 ? Math.max(1, 2 * Math.abs(u - cx0)) : r0.w;
     let h = hy !== 0 ? Math.max(1, 2 * Math.abs(v - cy0)) : r0.h;
     if (aspect) [w, h] = applyAspect(w, h, hx, hy, aspect);
-    const maxW = 2 * Math.min(cx0, W - cx0);
-    const maxH = 2 * Math.min(cy0, H - cy0);
+    const maxW = 2 * Math.min(cx0 - loX, hiX - cx0);
+    const maxH = 2 * Math.min(cy0 - loY, hiY - cy0);
     if (aspect) {
       const k = Math.min(1, maxW / w, maxH / h);
       w *= k;
@@ -95,16 +121,16 @@ export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: n
   let t = r0.y;
   let r = r0.x + r0.w;
   let b = r0.y + r0.h;
-  if (hx === 1) r = clamp(u, l + 1, W);
-  if (hx === -1) l = clamp(u, 0, r - 1);
-  if (hy === 1) b = clamp(v, t + 1, H);
-  if (hy === -1) t = clamp(v, 0, b - 1);
+  if (hx === 1) r = clamp(u, l + 1, hiX);
+  if (hx === -1) l = clamp(u, loX, r - 1);
+  if (hy === 1) b = clamp(v, t + 1, hiY);
+  if (hy === -1) t = clamp(v, loY, b - 1);
   if (!aspect) return { x: l, y: t, w: r - l, h: b - t };
 
   let [w, h] = applyAspect(r - l, b - t, hx, hy, aspect);
   // 基準（動かない側）と、そこから広げられる最大サイズ
-  const maxW = hx === 1 ? W - r0.x : hx === -1 ? r0.x + r0.w : 2 * Math.min(cx0, W - cx0);
-  const maxH = hy === 1 ? H - r0.y : hy === -1 ? r0.y + r0.h : 2 * Math.min(cy0, H - cy0);
+  const maxW = hx === 1 ? hiX - r0.x : hx === -1 ? r0.x + r0.w - loX : 2 * Math.min(cx0 - loX, hiX - cx0);
+  const maxH = hy === 1 ? hiY - r0.y : hy === -1 ? r0.y + r0.h - loY : 2 * Math.min(cy0 - loY, hiY - cy0);
   const k = Math.min(1, maxW / w, maxH / h);
   w *= k;
   h *= k;
@@ -129,4 +155,23 @@ export function maxCenteredRect(W: number, H: number, aspect: number): Rect {
     w = H * aspect;
   }
   return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
+
+/**
+ * キャンバスのトリミングを確定する（draft を直接変更）。
+ * キャンバスのサイズを枠の大きさにし、全アイテムを枠に合わせてずらす（見た目は変わらない）。形はキャンバスの形として保存する。
+ * 枠は整数のピクセルにそろえる
+ */
+export function applyCanvasCrop(d: DocState, rect: Rect, shape: CropShape): void {
+  const x = Math.round(rect.x);
+  const y = Math.round(rect.y);
+  const w = Math.max(1, Math.round(rect.w));
+  const h = Math.max(1, Math.round(rect.h));
+  for (const it of d.items) {
+    it.cx -= x;
+    it.cy -= y;
+  }
+  d.canvas.width = w;
+  d.canvas.height = h;
+  d.canvas.shape = { ...shape };
 }

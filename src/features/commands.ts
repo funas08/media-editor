@@ -1,10 +1,10 @@
 // よく使う編集コマンド（すべて Editor 経由で履歴に残す）
 
 import type { Asset } from '../core/AssetStore';
-import { createImageItem, newId } from '../core/doc';
+import { createDoc, createImageItem, newId } from '../core/doc';
 import type { Editor } from '../core/Editor';
 import { hitTest } from '../core/geometry';
-import type { Item, Point } from '../core/types';
+import type { DocState, Item, Point } from '../core/types';
 
 /** 画像を読み込む。失敗したファイル名も返す */
 export async function loadAssets(editor: Editor, files: File[]): Promise<{ assets: Asset[]; failed: string[] }> {
@@ -38,17 +38,24 @@ export function addImageItems(editor: Editor, assets: Asset[]): void {
   editor.setSelection(ids);
 }
 
-/** 画像を1枚開き、キャンバスをその画像のサイズにする（単体の画像編集用） */
-export function openAsDocument(editor: Editor, asset: Asset): void {
-  let id = '';
-  editor.update('画像として開く', (d) => {
-    d.canvas.width = asset.width;
-    d.canvas.height = asset.height;
-    const item = createImageItem(asset, asset.width / 2, asset.height / 2, 1);
-    d.items = [item];
-    id = item.id;
-  });
-  editor.setSelection([id]);
+/** 「画像を開く」の新しいドキュメント：キャンバスが画像のサイズで、画像が (0,0) にぴったり置かれる */
+export function documentFromImage(asset: { id: string; name: string; width: number; height: number }): DocState {
+  const doc = createDoc(asset.width, asset.height);
+  doc.items.push(createImageItem(asset, asset.width / 2, asset.height / 2, 1));
+  return doc;
+}
+
+/** 「白紙から作成」の新しいドキュメント */
+export function blankDocument(opts: { width: number; height: number; background: string; transparent: boolean }): DocState {
+  const doc = createDoc(Math.round(opts.width), Math.round(opts.height));
+  doc.canvas.background = opts.background;
+  doc.canvas.transparent = opts.transparent;
+  return doc;
+}
+
+/** ドキュメントで使われている元画像の ID */
+export function usedAssetIds(doc: DocState): Set<string> {
+  return new Set(doc.items.filter((it) => it.type === 'image').map((it) => it.assetId));
 }
 
 export function deleteSelected(editor: Editor): void {

@@ -3,7 +3,9 @@
 
 import type { AssetStore } from '../core/AssetStore';
 import type { DocState } from '../core/types';
-import { drawItems, drawScene } from './scene';
+import type { CropShape } from '../core/types';
+import { drawItems } from './scene';
+import { addShapePath } from './shapes';
 import type { View } from './view';
 
 export interface RenderFrame {
@@ -12,6 +14,16 @@ export interface RenderFrame {
   view: View;
   /** 画面座標（CSS px）でオーバーレイを描く */
   overlay?: (ctx: CanvasRenderingContext2D) => void;
+  /** キャンバスとして表示する範囲と形（省略時はドキュメントのキャンバス）。キャンバスのトリミングのプレビュー用 */
+  canvasArea?: CanvasArea | null;
+}
+
+export interface CanvasArea {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  shape: CropShape;
 }
 
 export interface SceneView {
@@ -58,15 +70,22 @@ export class CanvasSceneView implements SceneView {
     this.canvas.style.height = `${this.cssH}px`;
   }
 
-  render({ doc, assets, view, overlay }: RenderFrame): void {
+  render({ doc, assets, view, overlay, canvasArea }: RenderFrame): void {
     // 別モニターへの移動などで DPR が変わったら作り直す
     if ((window.devicePixelRatio || 1) !== this.dpr) this.resize(this.cssW, this.cssH);
     const { ctx, dpr } = this;
     const z = view.zoom;
-    const cw = doc.canvas.width;
-    const ch = doc.canvas.height;
     const sx = view.panX;
     const sy = view.panY;
+    // キャンバスとして表示する範囲（キャンバスのトリミング中は枠を仮のキャンバスとして表示する）
+    const area = canvasArea ?? { x: 0, y: 0, w: doc.canvas.width, h: doc.canvas.height, shape: doc.canvas.shape };
+    const acx = area.x + area.w / 2;
+    const acy = area.y + area.h / 2;
+    /** 範囲の形のパス（画面座標） */
+    const screenPath = () => {
+      ctx.beginPath();
+      addShapePath(ctx, area.shape, sx + acx * z, sy + acy * z, area.w * z, area.h * z);
+    };
 
     // 作業領域
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -80,11 +99,13 @@ export class CanvasSceneView implements SceneView {
     ctx.shadowColor = 'rgba(0,0,0,0.55)';
     ctx.shadowBlur = 18;
     ctx.fillStyle = '#000';
-    ctx.fillRect(sx, sy, cw * z, ch * z);
+    screenPath();
+    ctx.fill();
     ctx.restore();
     if (doc.canvas.transparent) {
       ctx.fillStyle = this.checkerPattern();
-      ctx.fillRect(sx, sy, cw * z, ch * z);
+      screenPath();
+      ctx.fill();
     }
 
     // キャンバス座標で描く
@@ -95,25 +116,30 @@ export class CanvasSceneView implements SceneView {
     ctx.save();
     ctx.beginPath();
     ctx.rect(-1e7, -1e7, 2e7, 2e7);
-    ctx.rect(0, 0, cw, ch);
+    addShapePath(ctx, area.shape, acx, acy, area.w, area.h);
     ctx.clip('evenodd');
     ctx.globalAlpha = OUTSIDE_ALPHA;
     drawItems(ctx, doc.items, env);
     ctx.restore();
 
-    // キャンバス内
+    // キャンバス内（背景とアイテム）
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, cw, ch);
+    addShapePath(ctx, area.shape, acx, acy, area.w, area.h);
     ctx.clip();
-    drawScene(ctx, doc, env);
+    if (!doc.canvas.transparent) {
+      ctx.fillStyle = doc.canvas.background;
+      ctx.fillRect(area.x, area.y, area.w, area.h);
+    }
+    drawItems(ctx, doc.items, env);
     ctx.restore();
 
     // 枠線とオーバーレイ（画面座標）
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(Math.round(sx) - 0.5, Math.round(sy) - 0.5, Math.round(cw * z) + 1, Math.round(ch * z) + 1);
+    screenPath();
+    ctx.stroke();
     if (overlay) {
       ctx.save();
       overlay(ctx);

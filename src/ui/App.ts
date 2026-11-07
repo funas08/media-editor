@@ -2,7 +2,17 @@
 
 import { Editor } from '../core/Editor';
 import type { Point } from '../core/types';
-import { addImageItems, deleteSelected, duplicateSelected, loadAssets, moveLayers, openAsDocument, selectAll } from '../features/commands';
+import {
+  addImageItems,
+  blankDocument,
+  deleteSelected,
+  documentFromImage,
+  duplicateSelected,
+  loadAssets,
+  moveLayers,
+  selectAll,
+  usedAssetIds,
+} from '../features/commands';
 import { IMAGE_ACCEPT, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
 import { PROJECT_EXT, buildProject, restoreProject } from '../io/project';
 import { LocalFileProjectStorage, type ProjectStorage } from '../io/ProjectStorage';
@@ -11,7 +21,7 @@ import { ACCENT, strokeItem } from '../render/overlay';
 import { CanvasSceneView } from '../render/ViewRenderer';
 import { View } from '../render/view';
 import { getTool, getTools } from '../tools/registry';
-import type { Tool, ToolHost, ToolPointerEvent } from '../tools/Tool';
+import type { Tool, ToolActivateOptions, ToolHost, ToolPointerEvent } from '../tools/Tool';
 import { h } from './controls';
 import { isDialogOpen } from './Dialog';
 import { openExportDialog } from './ExportDialog';
@@ -19,6 +29,7 @@ import { icons } from './icons';
 import { LayerPanel } from './LayerPanel';
 import { LeftPanel } from './LeftPanel';
 import { openShortcutsDialog } from './ShortcutsDialog';
+import { openStartDialog } from './StartDialog';
 import { StatusBar } from './StatusBar';
 import { Toaster } from './toast';
 import { TopBar } from './TopBar';
@@ -44,6 +55,7 @@ export class App implements ToolHost {
   private spaceDown = false;
   private panning: { last: Point; pointerId: number } | null = null;
   private dropTimer = 0;
+  private lastCanvasSize = { w: 0, h: 0 };
 
   /** プロジェクトの保存先（差し替え可能） */
   private storage: ProjectStorage = new LocalFileProjectStorage();
@@ -59,6 +71,7 @@ export class App implements ToolHost {
 
     // ---- 画面の組み立て ----
     this.topBar = new TopBar({
+      newDoc: () => this.newDocument(),
       addImages: () => void this.addImagesFromPicker(),
       open: () => void this.openFromPicker(),
       save: () => void this.saveProject(false),
@@ -87,7 +100,7 @@ export class App implements ToolHost {
         'div',
         { class: 'empty-actions' },
         h('button', { class: 'btn primary', type: 'button', onclick: () => void this.addImagesFromPicker() }, '画像を追加'),
-        h('button', { class: 'btn', type: 'button', onclick: () => void this.openFromPicker() }, '画像として開く'),
+        h('button', { class: 'btn', type: 'button', onclick: () => this.newDocument() }, '新規作成…'),
       ),
     );
     this.viewport = h('main', { class: 'viewport' }, canvas, this.emptyState);
@@ -98,7 +111,15 @@ export class App implements ToolHost {
     );
 
     // ---- イベント ----
-    this.editor.changed.on(() => this.refreshUI());
+    this.editor.changed.on(() => {
+      // キャンバスのサイズが変わったら（トリミングの確定・元に戻すなど）全体表示にする
+      const c = this.editor.doc.canvas;
+      if (c.width !== this.lastCanvasSize.w || c.height !== this.lastCanvasSize.h) {
+        this.lastCanvasSize = { w: c.width, h: c.height };
+        if (this.fitted) this.fitView();
+      }
+      this.refreshUI();
+    });
     this.bindViewport();
     this.bindKeyboard();
     this.bindDropAndPaste();
@@ -117,6 +138,8 @@ export class App implements ToolHost {
     this.tool.activate?.(this);
     this.updateCursor();
     this.refreshUI();
+    // 起動時は「新規作成」の画面を出す
+    queueMicrotask(() => this.showStartScreen());
   }
 
   // ===== ToolHost =====
@@ -150,15 +173,15 @@ export class App implements ToolHost {
     this.requestRender();
   }
 
-  setTool(id: string): void {
+  setTool(id: string, opts?: ToolActivateOptions): void {
     const next = getTool(id);
-    if (!next || next === this.tool) return;
+    if (!next || (next === this.tool && !opts)) return;
     this.editor.commit();
     this.tool.deactivate?.(this);
     this.tool = next;
     this.cursorOverride = null;
     this.left.showTool(next, this);
-    next.activate?.(this);
+    next.activate?.(this, opts);
     this.updateCursor();
     this.refreshUI();
   }
@@ -178,6 +201,7 @@ export class App implements ToolHost {
     const doc = this.tool.getPreview?.(this.editor.doc, this) ?? this.editor.doc;
     this.scene.render({
       doc,
+      canvasArea: this.tool.getCanvasArea?.(this.editor.doc, this) ?? null,
       assets: this.editor.assets,
       view: this.view,
       overlay: (ctx) => {
@@ -365,6 +389,10 @@ export class App implements ToolHost {
           case 'KeyO':
             void this.openFromPicker();
             break;
+          case 'KeyN':
+            // アプリとしてインストールした場合などは Ctrl+N も使える
+            this.newDocument();
+            break;
           case 'KeyS':
             void this.saveProject(e.shiftKey);
             break;
@@ -381,6 +409,12 @@ export class App implements ToolHost {
             else handled = false;
         }
         if (handled) e.preventDefault();
+        return;
+      }
+      // 新規作成：Alt+N（Chrome の通常のタブでは Ctrl+N をページ側で受け取れないため）
+      if (e.altKey && !e.shiftKey && e.code === 'KeyN') {
+        e.preventDefault();
+        this.newDocument();
         return;
       }
       if (e.altKey) return;
@@ -475,23 +509,76 @@ export class App implements ToolHost {
     else if (skipped > 0) this.toast(`画像以外のファイル ${skipped} 件は無視しました`);
   }
 
-  /** 開く：画像なら「画像として開く」、.json ならプロジェクトを読み込む */
+  // ===== 新規作成・開く =====
+
+  /** 未保存の変更があれば、破棄してよいか確認する */
+  private confirmDiscard(): boolean {
+    return !this.isDirty() || window.confirm('保存していない変更があります。破棄して続けますか？');
+  }
+
+  /** ドキュメントを丸ごと差し替える（新規作成・画像を開く・プロジェクトを開く） */
+  private replaceDocument(doc: DocState, projectName: string | null): void {
+    this.editor.reset(doc);
+    this.editor.assets.retainOnly(usedAssetIds(doc));
+    this.savedDoc = this.editor.doc;
+    this.projectName = projectName;
+    if (projectName === null) this.storage.forget();
+    this.fitView();
+    this.refreshUI();
+  }
+
+  /** 新規作成：起動画面を出す */
+  newDocument(): void {
+    if (isDialogOpen() || !this.confirmDiscard()) return;
+    this.showStartScreen();
+  }
+
+  /** 起動画面（確認は済んでいる前提） */
+  showStartScreen(): void {
+    openStartDialog({
+      openImages: (files) => this.openImagesAsNew(files),
+      pickImage: async () => {
+        const files = await pickFiles(IMAGE_ACCEPT, true);
+        return files.length > 0 ? this.openImagesAsNew(files) : false;
+      },
+      openProject: (file) => this.loadProject(file, false),
+      newBlank: (opts) => {
+        this.replaceDocument(blankDocument(opts), null);
+        this.toast(`${opts.width}×${opts.height} のキャンバスを作成しました`);
+      },
+    });
+  }
+
+  /**
+   * 画像を開く：1枚目でキャンバスのサイズを決めて (0,0) にぴったり置き、2枚目以降は追加の画像として置く。
+   * 新しいドキュメントになったら true
+   */
+  private async openImagesAsNew(files: File[]): Promise<boolean> {
+    const images = files.filter(isImageFile);
+    if (images.length === 0) {
+      this.toast('画像ファイルではありません');
+      return false;
+    }
+    const [first, ...rest] = images;
+    const { assets, failed } = await loadAssets(this.editor, [first]);
+    if (failed.length > 0 || !assets[0]) {
+      this.toast(`読み込めませんでした：${first.name}`);
+      return false;
+    }
+    this.replaceDocument(documentFromImage(assets[0]), null);
+    this.toast(`${first.name} を開きました（${assets[0].width}×${assets[0].height}）`);
+    if (rest.length > 0) await this.addFiles(rest);
+    return true;
+  }
+
+  /** 開く：画像なら「画像を開く」（新しいドキュメント）、.json ならプロジェクトを読み込む */
   private async openFromPicker(): Promise<void> {
+    if (!this.confirmDiscard()) return;
     const files = await pickFiles(`${IMAGE_ACCEPT},${PROJECT_EXT},application/json`, false);
     const f = files[0];
     if (!f) return;
-    if (f.name.toLowerCase().endsWith(PROJECT_EXT)) {
-      await this.loadProject(f);
-      return;
-    }
-    const { assets, failed } = await loadAssets(this.editor, [f]);
-    if (failed.length > 0 || !assets[0]) {
-      this.toast(`読み込めませんでした：${f.name}`);
-      return;
-    }
-    openAsDocument(this.editor, assets[0]);
-    this.fitView();
-    this.toast(`${f.name} を開きました（${assets[0].width}×${assets[0].height}）。Ctrl+Z で元に戻せます`);
+    if (f.name.toLowerCase().endsWith(PROJECT_EXT)) await this.loadProject(f, false);
+    else await this.openImagesAsNew([f]);
   }
 
   private openExport(): void {
@@ -518,21 +605,20 @@ export class App implements ToolHost {
     }
   }
 
-  private async loadProject(file?: File): Promise<void> {
-    if (this.isDirty() && !window.confirm('保存していない変更があります。破棄してプロジェクトを開きますか？')) return;
+  /** プロジェクトを開く。ask=true なら未保存の確認をする。開けたら true */
+  private async loadProject(file?: File, ask = true): Promise<boolean> {
+    if (ask && !this.confirmDiscard()) return false;
     try {
       const loaded = await this.storage.load(file);
-      if (!loaded) return;
+      if (!loaded) return false;
       const { doc, missing } = await restoreProject(loaded.project, this.editor.assets);
-      this.editor.reset(doc);
-      this.savedDoc = this.editor.doc;
-      this.projectName = loaded.name;
-      this.fitView();
-      this.refreshUI();
+      this.replaceDocument(doc, loaded.name);
       this.toast(`${loaded.name} を開きました${missing > 0 ? `（元画像がない ${missing} 件は除外）` : ''}`);
+      return true;
     } catch (err) {
       console.error(err);
       this.toast(`プロジェクトを開けませんでした：${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 }

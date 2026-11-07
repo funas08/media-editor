@@ -10,7 +10,8 @@ const SECTIONS: { title: string; entries: Entry[] }[] = [
   {
     title: 'ファイル',
     entries: [
-      ['Ctrl+O', '開く（画像として開く／プロジェクト）'],
+      ['Alt+N / Ctrl+N', '新規作成（Ctrl+N はアプリとしてインストールした場合など）'],
+      ['Ctrl+O', '開く（画像を開く／プロジェクト）'],
       ['Ctrl+S', 'プロジェクトを保存'],
       ['Ctrl+Shift+S', '名前を付けて保存'],
       ['Ctrl+Shift+E', '書き出し'],

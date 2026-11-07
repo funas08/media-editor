@@ -30,9 +30,9 @@ export async function renderToBlob(doc: DocState, assets: AssetStore, opts: Expo
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('書き出し用の Canvas を作成できませんでした');
   const info = FORMAT_INFO[opts.format];
-  // JPEG は透明を扱えないので、透明背景のときは白で塗る
-  if (opts.format === 'jpeg' && doc.canvas.transparent) {
-    ctx.fillStyle = '#ffffff';
+  // JPEG は透明を扱えないので、先に全体を塗る（キャンバスの形の外側も含む）。透明背景のときは白
+  if (opts.format === 'jpeg') {
+    ctx.fillStyle = doc.canvas.transparent ? '#ffffff' : doc.canvas.background;
     ctx.fillRect(0, 0, width, height);
   }
   ctx.scale(width / doc.canvas.width, height / doc.canvas.height);
