@@ -2,7 +2,7 @@
 
 import { Editor } from '../core/Editor';
 import { createDoc, createVideoItem } from '../core/doc';
-import { isItemShownAt, totalDuration, videoTimesAt } from '../core/timeline';
+import { isItemShownAt, snapToFrame, totalDuration, videoTimesAt } from '../core/timeline';
 import type { Item, Point } from '../core/types';
 import {
   addImageItems,
@@ -16,6 +16,8 @@ import {
   selectAll,
   usedAssetIds,
 } from '../features/commands';
+import { fitToCanvas } from '../features/transform';
+import { cutRange, splitAt } from '../features/videoEdit';
 import { IMAGE_ACCEPT, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
 import { PROJECT_EXT, buildProject, restoreProject } from '../io/project';
 import { LocalFileProjectStorage, type ProjectStorage } from '../io/ProjectStorage';
@@ -69,6 +71,9 @@ export class App implements ToolHost {
   /** 1コマ移動の単位（fps） */
   private stepFps = 30;
   private playLoop = 0;
+  /** I / O で指定した範囲（秒） */
+  private rangeIn: number | null = null;
+  private rangeOut: number | null = null;
 
   private renderQueued = false;
   private fitted = false;
@@ -138,6 +143,11 @@ export class App implements ToolHost {
       isPlaying: () => this.player.isPlaying,
       addVideos: () => void this.addVideosFromPicker(),
       focusTimeline: () => (this.timelineFocused = true),
+      getRange: () => ({ in: this.rangeIn, out: this.rangeOut }),
+      fps: () => this.stepFps,
+      split: () => this.splitAtPlayhead(),
+      cutRange: () => this.cutSelectedRange(),
+      fitClips: (mode) => this.fitClips(mode),
     });
     this.timeline.el.hidden = true;
 
@@ -326,6 +336,68 @@ export class App implements ToolHost {
     const duration = totalDuration(this.editor.doc);
     this.player.seek(this.editor.doc, Math.min(Math.max(0, t), duration));
     this.requestRender();
+  }
+
+  // ===== 動画の編集（V1） =====
+
+  /** 再生位置でクリップを分ける（S） */
+  private splitAtPlayhead(): void {
+    this.player.pause();
+    const t = snapToFrame(this.player.time, this.stepFps);
+    let id: string | null = null;
+    this.editor.update('分割', (d) => {
+      id = splitAt(d, t);
+    });
+    if (id) {
+      this.editor.setSelection([id]);
+      this.toast('クリップを分割しました');
+    } else {
+      this.toast('分割できません（再生位置がクリップの端に近いか、クリップがありません）');
+    }
+  }
+
+  /** I / O の範囲を設定する */
+  private setRangeMark(which: 'in' | 'out'): void {
+    const t = snapToFrame(this.player.time, this.stepFps);
+    if (which === 'in') this.rangeIn = t;
+    else this.rangeOut = t;
+    this.toast(which === 'in' ? `開始位置（I）：${t.toFixed(2)} 秒` : `終了位置（O）：${t.toFixed(2)} 秒`);
+    this.requestRender();
+  }
+
+  private clearRange(): boolean {
+    if (this.rangeIn === null && this.rangeOut === null) return false;
+    this.rangeIn = this.rangeOut = null;
+    this.requestRender();
+    return true;
+  }
+
+  /** I〜O の範囲を切り取って詰める */
+  private cutSelectedRange(): void {
+    if (this.rangeIn === null || this.rangeOut === null) {
+      this.toast('I（開始）と O（終了）で範囲を指定してください');
+      return;
+    }
+    this.player.pause();
+    const a = Math.min(this.rangeIn, this.rangeOut);
+    const b = Math.max(this.rangeIn, this.rangeOut);
+    let removed = 0;
+    this.editor.update('範囲をカット', (d) => {
+      removed = cutRange(d, a, b);
+    });
+    this.clearRange();
+    this.seek(a);
+    this.toast(removed > 0 ? `${removed.toFixed(2)} 秒をカットしました` : '範囲にクリップがありません');
+  }
+
+  /** 選択中（なければ全部）の動画クリップをキャンバスに収める／埋める */
+  private fitClips(mode: 'fit' | 'fill'): void {
+    const videos = this.editor.doc.items.filter((it) => it.type === 'video' && !it.locked);
+    const selected = videos.filter((it) => this.editor.isSelected(it.id));
+    const ids = (selected.length > 0 ? selected : videos).map((it) => it.id);
+    if (ids.length === 0) return;
+    this.editor.update(mode === 'fit' ? 'キャンバスに収める' : 'キャンバスを埋める', (d) => fitToCanvas(d, ids, mode));
+    this.toast(`${ids.length}本のクリップを${mode === 'fit' ? 'キャンバスに収めました' : 'キャンバスいっぱいにしました'}`);
   }
 
   /** 1コマ進める・戻す */
@@ -540,6 +612,25 @@ export class App implements ToolHost {
         return;
       }
       if (e.altKey) return;
+      // 動画モードのキー：S 分割 / I・O 範囲 / 範囲があるときの Delete はカット / Esc で範囲を解除
+      if (this.mode === 'video' && !e.shiftKey) {
+        if (e.code === 'KeyS') {
+          e.preventDefault();
+          this.splitAtPlayhead();
+          return;
+        }
+        if (e.code === 'KeyI' || e.code === 'KeyO') {
+          e.preventDefault();
+          this.setRangeMark(e.code === 'KeyI' ? 'in' : 'out');
+          return;
+        }
+        if ((e.key === 'Delete' || e.key === 'Backspace') && this.rangeIn !== null && this.rangeOut !== null) {
+          e.preventDefault();
+          this.cutSelectedRange();
+          return;
+        }
+        if (e.key === 'Escape' && this.clearRange()) return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         deleteSelected(this.editor);
@@ -717,6 +808,7 @@ export class App implements ToolHost {
 
   /** ドキュメントを丸ごと差し替える（新規作成・画像を開く・プロジェクトを開く） */
   private replaceDocument(doc: DocState, projectName: string | null): void {
+    this.rangeIn = this.rangeOut = null;
     this.player.pause();
     this.player.seek(doc, 0);
     this.editor.reset(doc);

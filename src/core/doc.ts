@@ -103,6 +103,7 @@ export function createVideoItem(src: VideoSource, cx: number, cy: number, scale 
     flipX: false,
     flipY: false,
     mediaId: src.id,
+    srcDuration: src.duration,
     srcWidth: src.width,
     srcHeight: src.height,
     crop: { x: 0, y: 0, w: src.width, h: src.height },

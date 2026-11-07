@@ -87,6 +87,8 @@ export interface ImageItem extends MediaItemBase {
 export interface VideoItem extends MediaItemBase {
   type: 'video';
   mediaId: string;
+  /** 元動画の長さ（秒）。トリムで広げられる上限 */
+  srcDuration: number;
   /** 元動画で使う範囲の開始（秒） */
   inPoint: number;
   /** 元動画で使う範囲の終了（秒） */
