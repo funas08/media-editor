@@ -167,6 +167,14 @@ registerTool({
     host.requestRender();
   },
 
+  // 画像のダブルクリックでトリミングを開始
+  onDoubleClick(e, host) {
+    const hit = topItemAt(host.editor.doc.items, e.doc);
+    if (!hit || hit.type !== 'image') return;
+    host.editor.setSelection([hit.id]);
+    host.setTool('crop');
+  },
+
   deactivate(host) {
     if (drag?.kind === 'move' && drag.started) host.editor.commit();
     drag = null;

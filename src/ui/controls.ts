@@ -160,3 +160,52 @@ export function iconButton(icon: string, title: string, onClick: () => void): HT
   b.addEventListener('mousedown', (e) => e.preventDefault());
   return b;
 }
+
+export interface SliderOpts {
+  label: string;
+  min: number;
+  max: number;
+  step?: number;
+  value: number;
+  unit?: string;
+  /** 既定値（ラベルのダブルクリックでこの値に戻す） */
+  defaultValue: number;
+  /** ドラッグ中（連続して呼ばれる） */
+  onInput: (v: number) => void;
+  /** 確定時（指を離したとき） */
+  onChange: (v: number) => void;
+}
+
+/** ラベル・値表示付きのスライダー */
+export function slider(o: SliderOpts): { el: HTMLElement; set(v: number): void; setDisabled(v: boolean): void } {
+  const input = h('input', { type: 'range', class: 'range', min: o.min, max: o.max, step: o.step ?? 1, value: o.value }) as HTMLInputElement;
+  const value = h('span', { class: 'slider-value' });
+  const show = (v: number) => {
+    value.textContent = `${Number(v.toFixed(2))}${o.unit ?? ''}`;
+    value.classList.toggle('changed', v !== o.defaultValue);
+  };
+  input.addEventListener('input', () => {
+    show(Number(input.value));
+    o.onInput(Number(input.value));
+  });
+  input.addEventListener('change', () => o.onChange(Number(input.value)));
+  const label = h('span', { class: 'slider-label', title: 'ダブルクリックで元に戻す' }, o.label);
+  label.addEventListener('dblclick', () => {
+    input.value = String(o.defaultValue);
+    show(o.defaultValue);
+    o.onInput(o.defaultValue);
+    o.onChange(o.defaultValue);
+  });
+  show(o.value);
+  const el = h('div', { class: 'slider' }, h('div', { class: 'slider-head' }, label, value), input);
+  return {
+    el,
+    set(v: number) {
+      if (document.activeElement !== input) input.value = String(v);
+      show(v);
+    },
+    setDisabled(v: boolean) {
+      input.disabled = v;
+    },
+  };
+}

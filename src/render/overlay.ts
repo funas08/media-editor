@@ -1,7 +1,7 @@
 // オーバーレイ（選択枠・ハンドル・ガイド・ラベル）の描画ヘルパー。画面座標（CSS px）で描く。
 
 import { itemCorners } from '../core/geometry';
-import type { Item, Point, Rect } from '../core/types';
+import type { ImageItem, Item, Point, Rect } from '../core/types';
 import type { View } from './view';
 
 export const ACCENT = '#4c8dff';
@@ -76,5 +76,34 @@ export function drawLine(ctx: CanvasRenderingContext2D, a: Point, b: Point, colo
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * トリミング中に、切り抜かれる部分の元画像を薄く描く（exclude は元画像座標の範囲で、そこは描かない）。
+ * it は元画像とキャンバスの対応を決めるアイテム（crop・拡大率・回転・反転）
+ */
+export function drawSourceGhost(
+  ctx: CanvasRenderingContext2D,
+  view: View,
+  it: ImageItem,
+  image: CanvasImageSource,
+  exclude: Rect,
+  alpha = 0.35,
+): void {
+  ctx.save();
+  ctx.translate(view.panX, view.panY);
+  ctx.scale(view.zoom, view.zoom);
+  ctx.translate(it.cx, it.cy);
+  ctx.rotate((it.rotation * Math.PI) / 180);
+  ctx.scale(it.flipX ? -it.scaleX : it.scaleX, it.flipY ? -it.scaleY : it.scaleY);
+  ctx.translate(-(it.crop.x + it.crop.w / 2), -(it.crop.y + it.crop.h / 2));
+  ctx.beginPath();
+  ctx.rect(0, 0, it.srcWidth, it.srcHeight);
+  ctx.rect(exclude.x, exclude.y, exclude.w, exclude.h);
+  ctx.clip('evenodd');
+  ctx.globalAlpha = alpha;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image, 0, 0);
   ctx.restore();
 }

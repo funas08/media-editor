@@ -705,3 +705,39 @@ kbd {
   gap: 2px;
   padding: 4px 8px 8px;
 }
+
+/* ---------- スライダー ---------- */
+.slider {
+  margin-bottom: 10px;
+}
+
+.slider-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.slider-label {
+  color: var(--text-dim);
+  cursor: default;
+  user-select: none;
+}
+
+.slider-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.slider-value.changed {
+  color: var(--accent-hover);
+}
+
+.range {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.range:disabled {
+  opacity: 0.4;
+}
