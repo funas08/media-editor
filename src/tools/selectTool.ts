@@ -170,7 +170,7 @@ registerTool({
   // 画像のダブルクリックでトリミングを開始
   onDoubleClick(e, host) {
     const hit = topItemAt(host.editor.doc.items, e.doc, false, (it) => host.isShown(it));
-    if (!hit || hit.type !== 'image') return;
+    if (!hit || (hit.type !== 'image' && hit.type !== 'video')) return;
     host.editor.setSelection([hit.id]);
     host.setTool('crop', { target: 'image' });
   },

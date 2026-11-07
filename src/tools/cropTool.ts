@@ -8,7 +8,7 @@
 // 共通：8方向ハンドル（Shift：縦横比固定（自由なら 1:1）、Alt：中心固定、Shift+Alt：両方）、三分割線、Enter / Esc で確定
 
 import { DEFAULT_CROP_SHAPE } from '../core/doc';
-import type { CropShape, CropShapeKind, ImageItem, Point, Rect } from '../core/types';
+import type { CropShape, CropShapeKind, MediaItem, Point, Rect } from '../core/types';
 import {
   applyCanvasCrop,
   clampRect,
@@ -40,7 +40,7 @@ interface ImageSession {
   /** 開始時のアイテムの状態（外から変更されたかの判定用） */
   baseJson: string;
   /** 元画像とキャンバスの対応の基準（中身をずらすと位置だけ変わる） */
-  orig: ImageItem;
+  orig: MediaItem;
   /** 切り抜き範囲（元画像の座標） */
   rect: Rect;
   shape: CropShape;
@@ -59,7 +59,7 @@ type Session = ImageSession | CanvasSession;
 
 type Drag =
   | { kind: 'handle'; hx: number; hy: number; r0: Rect }
-  | { kind: 'moveContent'; start: Point; r0: Rect; orig0: ImageItem }
+  | { kind: 'moveContent'; start: Point; r0: Rect; orig0: MediaItem }
   | { kind: 'moveFrame'; start: Point; r0: Rect };
 
 let session: Session | null = null;
@@ -136,7 +136,7 @@ function start(host: ToolHost): void {
   } else {
     const it = singleEditable(host);
     session =
-      it && it.type === 'image'
+      it && (it.type === 'image' || it.type === 'video')
         ? { kind: 'image', id: it.id, baseJson: JSON.stringify(it), orig: structuredClone(it), rect: { ...it.crop }, shape: { ...it.cropShape } }
         : null;
   }
@@ -163,7 +163,7 @@ function confirm(host: ToolHost): void {
     const full = isFullRect(s.orig, s.rect);
     host.editor.update('トリミング', (d) => {
       const it = d.items.find((x) => x.id === s.id);
-      if (!it || it.type !== 'image') return;
+      if (!it || (it.type !== 'image' && it.type !== 'video')) return;
       it.crop = { ...s.rect };
       it.userCrop = full ? null : { ...s.rect };
       it.cropShape = { ...s.shape };
@@ -262,7 +262,7 @@ registerTool({
       session = null;
       return null;
     }
-    const preview: ImageItem = { ...withCrop(s.orig, s.rect), cropShape: { ...s.shape } };
+    const preview: MediaItem = { ...withCrop(s.orig, s.rect), cropShape: { ...s.shape } };
     return { ...doc, items: doc.items.map((it) => (it.id === s.id ? preview : it)) };
   },
 
@@ -339,7 +339,7 @@ registerTool({
     if (s && insideRect(s, e.doc) && s.kind === 'image') return;
     // キャンバスが対象のときに画像をダブルクリック → その画像のトリミングに切り替え
     if (st.target === 'canvas') {
-      const hit = host.editor.doc.items.slice().reverse().find((it) => it.visible && !it.locked && it.type === 'image' && insideItem(it, e.doc));
+      const hit = host.editor.doc.items.slice().reverse().find((it) => it.visible && !it.locked && host.isShown(it) && (it.type === 'image' || it.type === 'video') && insideItem(it, e.doc));
       if (!hit) return;
       confirm(host);
       host.editor.setSelection([hit.id]);
@@ -373,7 +373,8 @@ registerTool({
     if (!s) return;
     const { view } = host;
     if (s.kind === 'image') {
-      const asset = host.editor.assets.get(s.orig.assetId);
+      // 切り抜かれる部分の薄い表示は画像のみ（動画は元のフレーム全体を持っていないため省略）
+      const asset = s.orig.type === 'image' ? host.editor.assets.get(s.orig.assetId) : undefined;
       if (asset) drawSourceGhost(ctx, view, s.orig, asset.bitmap, s.rect, s.shape);
     }
     const k = scaleOf(s);
@@ -643,11 +644,11 @@ function hasPendingChange(host: ToolHost): boolean {
     return s.rect.x !== 0 || s.rect.y !== 0 || s.rect.w !== c.width || s.rect.h !== c.height || JSON.stringify(s.shape) !== JSON.stringify(c.shape);
   }
   const cur = host.editor.doc.items.find((x) => x.id === s.id);
-  return !cur || cur.type !== 'image' || JSON.stringify([cur.crop, cur.cropShape, cur.cx, cur.cy]) !== JSON.stringify([s.rect, s.shape, s.orig.cx, s.orig.cy]);
+  return !cur || (cur.type !== 'image' && cur.type !== 'video') || JSON.stringify([cur.crop, cur.cropShape, cur.cx, cur.cy]) !== JSON.stringify([s.rect, s.shape, s.orig.cx, s.orig.cy]);
 }
 
 /** 点がアイテムの上にあるか（ダブルクリック判定用） */
-function insideItem(it: ImageItem, p: Point): boolean {
+function insideItem(it: MediaItem, p: Point): boolean {
   const q = docToSource(it, p);
   const c = it.crop;
   return q.x >= c.x && q.x <= c.x + c.w && q.y >= c.y && q.y <= c.y + c.h;

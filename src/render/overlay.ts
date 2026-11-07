@@ -1,7 +1,7 @@
 // オーバーレイ（選択枠・ハンドル・ガイド・ラベル）の描画ヘルパー。画面座標（CSS px）で描く。
 
 import { itemCorners } from '../core/geometry';
-import type { CropShape, ImageItem, Item, Point, Rect } from '../core/types';
+import type { CropShape, Item, MediaItem, Point, Rect } from '../core/types';
 import { addShapePath, shapeRadius } from './shapes';
 import type { View } from './view';
 
@@ -87,7 +87,7 @@ export function drawLine(ctx: CanvasRenderingContext2D, a: Point, b: Point, colo
 export function drawSourceGhost(
   ctx: CanvasRenderingContext2D,
   view: View,
-  it: ImageItem,
+  it: MediaItem,
   image: CanvasImageSource,
   exclude: Rect,
   shape: CropShape,
