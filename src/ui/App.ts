@@ -3,17 +3,22 @@
 import { Editor } from '../core/Editor';
 import type { Point } from '../core/types';
 import { addImageItems, deleteSelected, duplicateSelected, loadAssets, moveLayers, openAsDocument, selectAll } from '../features/commands';
-import { defaultExportName, exportSize, renderToBlob } from '../features/export';
-import { IMAGE_ACCEPT, downloadBlob, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
+import { IMAGE_ACCEPT, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
+import { PROJECT_EXT, buildProject, restoreProject } from '../io/project';
+import { LocalFileProjectStorage, type ProjectStorage } from '../io/ProjectStorage';
+import type { DocState } from '../core/types';
 import { ACCENT, strokeItem } from '../render/overlay';
 import { CanvasSceneView } from '../render/ViewRenderer';
 import { View } from '../render/view';
 import { getTool, getTools } from '../tools/registry';
 import type { Tool, ToolHost, ToolPointerEvent } from '../tools/Tool';
 import { h } from './controls';
+import { isDialogOpen } from './Dialog';
+import { openExportDialog } from './ExportDialog';
 import { icons } from './icons';
 import { LayerPanel } from './LayerPanel';
 import { LeftPanel } from './LeftPanel';
+import { openShortcutsDialog } from './ShortcutsDialog';
 import { StatusBar } from './StatusBar';
 import { Toaster } from './toast';
 import { TopBar } from './TopBar';
@@ -40,26 +45,32 @@ export class App implements ToolHost {
   private panning: { last: Point; pointerId: number } | null = null;
   private dropTimer = 0;
 
+  /** プロジェクトの保存先（差し替え可能） */
+  private storage: ProjectStorage = new LocalFileProjectStorage();
+  private projectName: string | null = null;
+  /** 最後に保存（または読み込み）した時点のドキュメント。今の doc と同じなら未保存の変更なし */
+  private savedDoc: DocState;
+
   constructor(root: HTMLElement) {
     const first = getTool('select') ?? getTools()[0];
     if (!first) throw new Error('ツールが登録されていません');
     this.tool = first;
+    this.savedDoc = this.editor.doc;
 
     // ---- 画面の組み立て ----
     this.topBar = new TopBar({
       addImages: () => void this.addImagesFromPicker(),
       open: () => void this.openFromPicker(),
-      save: () => this.toast('プロジェクトの保存は Phase 3 で実装します'),
-      exportImage: () => void this.quickExport(),
+      save: () => void this.saveProject(false),
+      exportImage: () => this.openExport(),
       undo: () => this.editor.undo(),
       redo: () => this.editor.redo(),
       zoomOut: () => this.stepZoom(-1),
       zoomIn: () => this.stepZoom(1),
       zoom100: () => this.setZoom(1),
       fit: () => this.fitView(),
-      help: () => this.toast('ショートカット一覧は Phase 3 で実装します'),
+      help: () => openShortcutsDialog(),
     });
-    this.topBar.saveBtn.disabled = true;
 
     this.left = new LeftPanel(this);
     this.layers = new LayerPanel(this.editor);
@@ -71,7 +82,7 @@ export class App implements ToolHost {
       { class: 'empty-state' },
       h('div', { class: 'empty-icon', html: icons.imagePlus }),
       h('p', { class: 'empty-title' }, 'ここに画像をドラッグ&ドロップ'),
-      h('p', { class: 'empty-sub' }, '複数枚まとめて追加できます。Ctrl+V で貼り付けもできます'),
+      h('p', { class: 'empty-sub' }, '複数枚まとめて追加できます。Ctrl+V で貼り付け、プロジェクト（.json）のドロップもできます'),
       h(
         'div',
         { class: 'empty-actions' },
@@ -124,7 +135,13 @@ export class App implements ToolHost {
     this.layers.update();
     this.topBar.update(this.editor, this.view);
     this.emptyState.hidden = this.editor.doc.items.length > 0;
+    document.title = `${this.isDirty() ? '● ' : ''}${this.projectName ?? '無題'} - 画像エディタ`;
     this.requestRender();
+  }
+
+  /** 保存していない変更があるか */
+  private isDirty(): boolean {
+    return this.editor.doc !== this.savedDoc && this.editor.doc.items.length > 0;
   }
 
   fitView(): void {
@@ -290,7 +307,8 @@ export class App implements ToolHost {
 
   private bindKeyboard(): void {
     window.addEventListener('keydown', (e) => {
-      if (isTypingTarget(e)) return;
+      // ダイアログ表示中はキャンバスのショートカットを無効にする
+      if (isDialogOpen() || isTypingTarget(e)) return;
       // Alt 単独で押したときにブラウザのメニューへフォーカスが移るのを防ぐ（Alt はスナップの一時無効に使う）
       if (e.key === 'Alt') {
         e.preventDefault();
@@ -347,8 +365,11 @@ export class App implements ToolHost {
           case 'KeyO':
             void this.openFromPicker();
             break;
+          case 'KeyS':
+            void this.saveProject(e.shiftKey);
+            break;
           case 'KeyE':
-            if (e.shiftKey) void this.quickExport();
+            if (e.shiftKey) this.openExport();
             else handled = false;
             break;
           default:
@@ -370,6 +391,11 @@ export class App implements ToolHost {
       }
       if (e.key === 'Escape') {
         this.editor.setSelection([]);
+        return;
+      }
+      if (e.key === '?') {
+        e.preventDefault();
+        openShortcutsDialog();
         return;
       }
       // ツールの切り替え（IME がオンでも効くよう e.code で判定）
@@ -409,10 +435,18 @@ export class App implements ToolHost {
       if (!e.dataTransfer?.types.includes('Files')) return;
       e.preventDefault();
       this.viewport.classList.remove('drag-over');
-      void this.addFiles(filesFromDrop(e));
+      if (isDialogOpen()) return;
+      const files = filesFromDrop(e);
+      const project = files.find((f) => f.name.toLowerCase().endsWith(PROJECT_EXT));
+      if (project) void this.loadProject(project);
+      else void this.addFiles(files);
+    });
+    // 保存していない変更があるときは、ページを閉じる前に確認する
+    window.addEventListener('beforeunload', (e) => {
+      if (this.isDirty()) e.preventDefault();
     });
     document.addEventListener('paste', (e) => {
-      if (isTypingTarget(e)) return;
+      if (isDialogOpen() || isTypingTarget(e)) return;
       const files = imagesFromClipboard(e);
       if (files.length === 0) return;
       e.preventDefault();
@@ -441,10 +475,15 @@ export class App implements ToolHost {
     else if (skipped > 0) this.toast(`画像以外のファイル ${skipped} 件は無視しました`);
   }
 
+  /** 開く：画像なら「画像として開く」、.json ならプロジェクトを読み込む */
   private async openFromPicker(): Promise<void> {
-    const files = await pickFiles(IMAGE_ACCEPT, false);
+    const files = await pickFiles(`${IMAGE_ACCEPT},${PROJECT_EXT},application/json`, false);
     const f = files[0];
     if (!f) return;
+    if (f.name.toLowerCase().endsWith(PROJECT_EXT)) {
+      await this.loadProject(f);
+      return;
+    }
     const { assets, failed } = await loadAssets(this.editor, [f]);
     if (failed.length > 0 || !assets[0]) {
       this.toast(`読み込めませんでした：${f.name}`);
@@ -452,22 +491,56 @@ export class App implements ToolHost {
     }
     openAsDocument(this.editor, assets[0]);
     this.fitView();
-    this.toast(`${f.name} を開きました（${assets[0].width}×${assets[0].height}）`);
+    this.toast(`${f.name} を開きました（${assets[0].width}×${assets[0].height}）。Ctrl+Z で元に戻せます`);
   }
 
-  /** Phase 0 の仮の書き出し（PNG・等倍）。Phase 3 で書き出しダイアログにする */
-  private async quickExport(): Promise<void> {
+  private openExport(): void {
+    this.editor.commit();
+    openExportDialog(this.editor, (m) => this.toast(m));
+  }
+
+  // ===== プロジェクトの保存・読み込み =====
+
+  private async saveProject(saveAs: boolean): Promise<void> {
+    this.editor.commit();
     const doc = this.editor.doc;
     try {
-      const blob = await renderToBlob(doc, this.editor.assets, { format: 'png', quality: 0.92, scale: 1 });
-      downloadBlob(blob, defaultExportName('png'));
-      const s = exportSize(doc, 1);
-      this.toast(`PNG を書き出しました（${s.width}×${s.height}）`);
+      const project = await buildProject(doc, this.editor.assets);
+      const name = await this.storage.save(project, { suggestedName: this.projectName ?? defaultProjectName(), saveAs });
+      if (!name) return;
+      this.projectName = name;
+      this.savedDoc = doc;
+      this.refreshUI();
+      this.toast(`${name} に保存しました`);
     } catch (err) {
       console.error(err);
-      this.toast('書き出しに失敗しました');
+      this.toast('保存に失敗しました');
     }
   }
+
+  private async loadProject(file?: File): Promise<void> {
+    if (this.isDirty() && !window.confirm('保存していない変更があります。破棄してプロジェクトを開きますか？')) return;
+    try {
+      const loaded = await this.storage.load(file);
+      if (!loaded) return;
+      const { doc, missing } = await restoreProject(loaded.project, this.editor.assets);
+      this.editor.reset(doc);
+      this.savedDoc = this.editor.doc;
+      this.projectName = loaded.name;
+      this.fitView();
+      this.refreshUI();
+      this.toast(`${loaded.name} を開きました${missing > 0 ? `（元画像がない ${missing} 件は除外）` : ''}`);
+    } catch (err) {
+      console.error(err);
+      this.toast(`プロジェクトを開けませんでした：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+function defaultProjectName(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `project-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 }
 
 /** 文字入力中のキー操作はショートカットとして扱わない */

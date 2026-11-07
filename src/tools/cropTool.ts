@@ -15,6 +15,8 @@ type AspectId = 'free' | 'orig' | '16:9' | '4:3' | '1:1';
 
 interface Session {
   id: string;
+  /** 開始時のアイテムの状態（外から変更されたかの判定用） */
+  baseJson: string;
   /** 開始時のアイテム（元画像とキャンバスの対応の基準） */
   orig: ImageItem;
   /** 切り抜き範囲（元画像の座標） */
@@ -63,7 +65,7 @@ function start(host: ToolHost): void {
     session = null;
     return;
   }
-  session = { id: it.id, orig: structuredClone(it), rect: { ...it.crop } };
+  session = { id: it.id, baseJson: JSON.stringify(it), orig: structuredClone(it), rect: { ...it.crop } };
   applyAspect();
   host.requestRender();
 }
@@ -135,10 +137,15 @@ registerTool({
     // 選択が変わったら対象を切り替え、Undo などで外から変わったら作り直す
     unsubscribe = host.editor.changed.on((ev) => {
       if (confirming) return;
+      // Undo などで対象の画像そのものが変わったときだけ作り直す（他のレイヤーの変更では続ける）
       if (ev.history && session) {
-        session = null;
-        start(host);
-        return;
+        const s = session;
+        const cur = host.editor.doc.items.find((x) => x.id === s.id);
+        if (!cur || JSON.stringify(cur) !== s.baseJson) {
+          session = null;
+          start(host);
+          return;
+        }
       }
       if (ev.selection) {
         if (session && !host.editor.selection.includes(session.id)) confirm(host);

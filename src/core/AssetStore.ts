@@ -24,6 +24,11 @@ export class AssetStore {
     return asset;
   }
 
+  /** 読み込み済みのアセットをそのまま登録（プロジェクト読み込み用） */
+  put(asset: Asset): void {
+    this.assets.set(asset.id, asset);
+  }
+
   get(id: string): Asset | undefined {
     return this.assets.get(id);
   }

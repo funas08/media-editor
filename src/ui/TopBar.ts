@@ -43,7 +43,7 @@ export class TopBar {
     this.redoBtn = barButton(icons.redo, null, 'やり直し（Ctrl+Shift+Z）', a.redo);
     this.zoomBtn = h('button', { class: 'tb-btn zoom-label', type: 'button', title: '100% 表示（Ctrl+1）', onclick: a.zoom100 }, '100%') as HTMLButtonElement;
     this.zoomBtn.addEventListener('mousedown', (e) => e.preventDefault());
-    this.saveBtn = barButton(icons.save, '保存', 'プロジェクトを保存（Ctrl+S）', a.save);
+    this.saveBtn = barButton(icons.save, '保存', 'プロジェクトを保存（Ctrl+S、名前を付けて保存は Ctrl+Shift+S）', a.save);
 
     this.el = h(
       'header',
@@ -53,9 +53,9 @@ export class TopBar {
         'div',
         { class: 'tb-group' },
         barButton(icons.imagePlus, '画像を追加', '画像を追加（複数可）', a.addImages),
-        barButton(icons.open, '開く', '画像として開く（キャンバスを画像のサイズにする）（Ctrl+O）', a.open),
+        barButton(icons.open, '開く', '画像として開く（キャンバスを画像のサイズにする）／プロジェクト（.json）を開く（Ctrl+O）', a.open),
         this.saveBtn,
-        barButton(icons.export, '書き出し', '画像として書き出す（Ctrl+Shift+E）', a.exportImage),
+        barButton(icons.export, '書き出し', '画像として書き出す：形式・品質・倍率を選択（Ctrl+Shift+E）', a.exportImage),
       ),
       h('div', { class: 'tb-sep' }),
       h('div', { class: 'tb-group' }, this.undoBtn, this.redoBtn),

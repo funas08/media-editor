@@ -19,7 +19,8 @@ export class LayerPanel {
   private toggleBtn: HTMLButtonElement;
   private actionBtns: HTMLButtonElement[];
   private signature = '';
-  private thumbs = new Map<string, string>();
+  /** 画像データごとのサムネイル（読み込み直した画像は別の ImageBitmap になるので自然に作り直される） */
+  private thumbs = new WeakMap<ImageBitmap, Map<string, string>>();
   private collapsed: boolean;
   private renaming: string | null = null;
 
@@ -155,11 +156,16 @@ export class LayerPanel {
   /** サムネイル（トリミング後の見た目）。アセットとトリミング範囲ごとにキャッシュ */
   private thumb(it: Item): string {
     if (it.type !== 'image') return '';
-    const key = `${it.assetId}:${it.crop.x},${it.crop.y},${it.crop.w},${it.crop.h}`;
-    const cached = this.thumbs.get(key);
-    if (cached) return cached;
     const asset = this.editor.assets.get(it.assetId);
     if (!asset) return '';
+    const key = `${it.crop.x},${it.crop.y},${it.crop.w},${it.crop.h}`;
+    let perAsset = this.thumbs.get(asset.bitmap);
+    if (!perAsset) {
+      perAsset = new Map();
+      this.thumbs.set(asset.bitmap, perAsset);
+    }
+    const cached = perAsset.get(key);
+    if (cached) return cached;
     const dpr = window.devicePixelRatio || 1;
     const c = document.createElement('canvas');
     c.width = THUMB_W * dpr;
@@ -171,7 +177,7 @@ export class LayerPanel {
     g.imageSmoothingQuality = 'high';
     g.drawImage(asset.bitmap, it.crop.x, it.crop.y, it.crop.w, it.crop.h, (c.width - w) / 2, (c.height - hh) / 2, w, hh);
     const url = c.toDataURL();
-    this.thumbs.set(key, url);
+    perAsset.set(key, url);
     return url;
   }
 }
