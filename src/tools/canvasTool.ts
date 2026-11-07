@@ -1,6 +1,7 @@
 // キャンバス(K)：キャンバスのサイズと背景
 
 import { CANVAS_PRESETS, MAX_CANVAS_SIDE, findPreset } from '../features/canvasPresets';
+import { fitCanvasToItems } from '../features/transform';
 import { button, checkbox, group, h, hint, numberInput, row, selectInput, type Choice } from '../ui/controls';
 import { icons } from '../ui/icons';
 import { registerTool } from './registry';
@@ -48,6 +49,24 @@ registerTool({
       unit: 'px',
       onChange: (v) => setSize(host, editor.doc.canvas.width, v),
     });
+    const fitBtn = button(
+      'キャンバスを選択した画像に合わせる',
+      () => {
+        let ok = false;
+        editor.update('キャンバスを画像に合わせる', (d) => {
+          ok = fitCanvasToItems(d, editor.selection);
+        });
+        if (!ok) {
+          host.toast('合わせる画像を選択してください');
+          return;
+        }
+        host.fitView();
+        const c = editor.doc.canvas;
+        host.toast(`キャンバスを ${c.width}×${c.height} にしました`);
+      },
+      { title: '選択した画像がちょうど収まる大きさにする（アイコン用の丸い画像づくりなどに）' },
+    );
+    fitBtn.classList.add('block-left');
     const swapBtn = button('縦横を入れ替え', () => setSize(host, editor.doc.canvas.height, editor.doc.canvas.width), { icon: icons.rotateRight });
 
     // 背景色：ドラッグ中はプレビュー、閉じたら1回分として履歴に残す
@@ -68,9 +87,10 @@ registerTool({
     const el = h(
       'div',
       {},
-      group('サイズ', presetSel.el, row('幅', widthIn.el), row('高さ', heightIn.el), swapBtn),
+      group('サイズ', presetSel.el, row('幅', widthIn.el), row('高さ', heightIn.el), swapBtn, fitBtn),
       group('背景', row('背景色', color), transparentCb.el),
       hint('サイズを変えても画像の位置はそのままです。並べ直すには「並べる(G)」を使います。'),
+      hint('丸いアイコン画像の作り方：トリミングで「正円」→ 確定 →「キャンバスを選択した画像に合わせる」→「透明」→ PNG で書き出し'),
     );
 
     const update = () => {
@@ -81,6 +101,7 @@ registerTool({
       if (document.activeElement !== color) color.value = c.background;
       color.disabled = c.transparent;
       transparentCb.set(c.transparent);
+      fitBtn.disabled = editor.selection.length === 0;
     };
     update();
     return { el, update };

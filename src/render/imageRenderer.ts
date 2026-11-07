@@ -4,6 +4,7 @@ import { DEFAULT_ADJUST } from '../core/doc';
 import { DEG, itemSize } from '../core/geometry';
 import type { Adjust } from '../core/types';
 import { registerItemRenderer } from './itemRenderers';
+import { addShapePath } from './shapes';
 
 /** 色調補正パラメータを Canvas の filter 文字列に変換 */
 export function adjustToFilter(a: Adjust, pixelScale: number): string {
@@ -34,6 +35,12 @@ registerItemRenderer('image', {
     const onScreenScale = env.pixelScale * Math.min(it.scaleX, it.scaleY);
     ctx.imageSmoothingEnabled = !(env.pixelated && onScreenScale >= 2);
     ctx.imageSmoothingQuality = 'high';
+    // 切り抜きの形でクリップ（四角形ならクリップ不要）
+    if (it.cropShape.kind !== 'rect') {
+      ctx.beginPath();
+      addShapePath(ctx, it.cropShape, 0, 0, w, h);
+      ctx.clip();
+    }
     const c = it.crop;
     ctx.drawImage(asset.bitmap, c.x, c.y, c.w, c.h, -w / 2, -h / 2, w, h);
     ctx.restore();

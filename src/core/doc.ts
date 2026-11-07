@@ -1,6 +1,6 @@
 // ドキュメント・アイテムの生成と小さなユーティリティ
 
-import type { Adjust, DocState, ImageItem, Item, Rect } from './types';
+import type { Adjust, CropShape, DocState, ImageItem, Item, Rect } from './types';
 
 export const DEFAULT_ADJUST: Readonly<Adjust> = {
   brightness: 100,
@@ -10,6 +10,8 @@ export const DEFAULT_ADJUST: Readonly<Adjust> = {
   grayscale: 0,
   blur: 0,
 };
+
+export const DEFAULT_CROP_SHAPE: Readonly<CropShape> = { kind: 'rect', radius: 0.12 };
 
 export function newId(prefix = 'it'): string {
   return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
@@ -47,10 +49,25 @@ export function createImageItem(src: ImageSource, cx: number, cy: number, scale 
     srcHeight: src.height,
     crop: { x: 0, y: 0, w: src.width, h: src.height },
     userCrop: null,
+    cropShape: { ...DEFAULT_CROP_SHAPE },
     scaleX: scale,
     scaleY: scale,
     adjust: { ...DEFAULT_ADJUST },
   };
+}
+
+/**
+ * 古い形式のドキュメントを今の形式にそろえる（プロジェクト読み込み時）。
+ * - cropShape がない画像は四角形として扱う
+ */
+export function normalizeDoc(doc: DocState): DocState {
+  for (const it of doc.items) {
+    if (it.type !== 'image') continue;
+    const shape = (it as Partial<ImageItem>).cropShape;
+    if (!shape || !['rect', 'roundRect', 'ellipse'].includes(shape.kind)) it.cropShape = { ...DEFAULT_CROP_SHAPE };
+    else if (typeof shape.radius !== 'number') shape.radius = DEFAULT_CROP_SHAPE.radius;
+  }
+  return doc;
 }
 
 export function cloneDoc(doc: DocState): DocState {

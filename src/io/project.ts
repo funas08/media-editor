@@ -2,6 +2,7 @@
 // 元画像は data URL（base64）として埋め込む。ファイルはブラウザの中だけで作り・読み、外部には送らない。
 
 import type { Asset, AssetStore } from '../core/AssetStore';
+import { normalizeDoc } from '../core/doc';
 import type { DocState } from '../core/types';
 
 export const PROJECT_APP = 'image-editor';
@@ -76,7 +77,7 @@ export async function restoreProject(p: ProjectFile, store: AssetStore): Promise
     loaded.push({ id: a.id, name: a.name, width: bitmap.width, height: bitmap.height, bitmap, blob });
   }
   const ids = new Set(loaded.map((a) => a.id));
-  const doc = structuredClone(p.doc);
+  const doc = normalizeDoc(structuredClone(p.doc));
   const before = doc.items.length;
   doc.items = doc.items.filter((it) => it.type !== 'image' || ids.has(it.assetId));
   store.clear();

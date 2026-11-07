@@ -28,6 +28,15 @@ export interface Adjust {
   blur: number;
 }
 
+/** 切り抜きの形 */
+export type CropShapeKind = 'rect' | 'roundRect' | 'ellipse';
+
+export interface CropShape {
+  kind: CropShapeKind;
+  /** 角丸の半径（表示上の短い辺に対する割合 0〜0.5）。roundRect のときだけ使う */
+  radius: number;
+}
+
 /** すべてのアイテムに共通の属性 */
 export interface ItemBase {
   id: string;
@@ -59,6 +68,8 @@ export interface ImageItem extends ItemBase {
    * 「並べる」の「埋める」は crop をこの範囲の中から自動で決めるので、ユーザーの指定と区別して持つ
    */
   userCrop: Rect | null;
+  /** 切り抜きの形（crop の矩形に内接する形でクリップする） */
+  cropShape: CropShape;
   /** 拡大率（crop の 1px がキャンバス上で何 px になるか） */
   scaleX: number;
   scaleY: number;

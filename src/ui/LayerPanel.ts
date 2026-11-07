@@ -3,6 +3,7 @@
 import type { Editor } from '../core/Editor';
 import type { Item } from '../core/types';
 import { deleteSelected, duplicateSelected, moveLayers, setItemProps } from '../features/commands';
+import { addShapePath } from '../render/shapes';
 import { h, iconButton } from './controls';
 import { icons } from './icons';
 
@@ -69,7 +70,7 @@ export class LayerPanel {
    */
   update(): void {
     const { doc, selection } = this.editor;
-    const sig = JSON.stringify([doc.items.map((it) => [it.id, it.name, it.visible, it.locked, it.type === 'image' ? it.crop : 0]), this.renaming]);
+    const sig = JSON.stringify([doc.items.map((it) => [it.id, it.name, it.visible, it.locked, it.type === 'image' ? [it.crop, it.cropShape] : 0]), this.renaming]);
     for (const b of this.actionBtns) b.disabled = selection.length === 0;
     if (sig !== this.signature) {
       this.signature = sig;
@@ -158,7 +159,7 @@ export class LayerPanel {
     if (it.type !== 'image') return '';
     const asset = this.editor.assets.get(it.assetId);
     if (!asset) return '';
-    const key = `${it.crop.x},${it.crop.y},${it.crop.w},${it.crop.h}`;
+    const key = `${it.crop.x},${it.crop.y},${it.crop.w},${it.crop.h},${it.cropShape.kind},${it.cropShape.radius}`;
     let perAsset = this.thumbs.get(asset.bitmap);
     if (!perAsset) {
       perAsset = new Map();
@@ -175,6 +176,11 @@ export class LayerPanel {
     const w = it.crop.w * s;
     const hh = it.crop.h * s;
     g.imageSmoothingQuality = 'high';
+    if (it.cropShape.kind !== 'rect') {
+      g.beginPath();
+      addShapePath(g, it.cropShape, c.width / 2, c.height / 2, w, hh);
+      g.clip();
+    }
     g.drawImage(asset.bitmap, it.crop.x, it.crop.y, it.crop.w, it.crop.h, (c.width - w) / 2, (c.height - hh) / 2, w, hh);
     const url = c.toDataURL();
     perAsset.set(key, url);

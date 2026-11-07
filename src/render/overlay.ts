@@ -1,7 +1,8 @@
 // オーバーレイ（選択枠・ハンドル・ガイド・ラベル）の描画ヘルパー。画面座標（CSS px）で描く。
 
 import { itemCorners } from '../core/geometry';
-import type { ImageItem, Item, Point, Rect } from '../core/types';
+import type { CropShape, ImageItem, Item, Point, Rect } from '../core/types';
+import { addShapePath, shapeRadius } from './shapes';
 import type { View } from './view';
 
 export const ACCENT = '#4c8dff';
@@ -89,6 +90,7 @@ export function drawSourceGhost(
   it: ImageItem,
   image: CanvasImageSource,
   exclude: Rect,
+  shape: CropShape,
   alpha = 0.35,
 ): void {
   ctx.save();
@@ -100,10 +102,36 @@ export function drawSourceGhost(
   ctx.translate(-(it.crop.x + it.crop.w / 2), -(it.crop.y + it.crop.h / 2));
   ctx.beginPath();
   ctx.rect(0, 0, it.srcWidth, it.srcHeight);
-  ctx.rect(exclude.x, exclude.y, exclude.w, exclude.h);
+  // 切り抜かれずに残る形（元画像の座標）。角丸の半径は表示上の大きさから縦横別に換算する
+  const r = shapeRadius(shape, exclude.w * it.scaleX, exclude.h * it.scaleY);
+  addShapePath(ctx, shape, exclude.x + exclude.w / 2, exclude.y + exclude.h / 2, exclude.w, exclude.h, r / it.scaleX, r / it.scaleY);
   ctx.clip('evenodd');
   ctx.globalAlpha = alpha;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(image, 0, 0);
+  ctx.restore();
+}
+
+/** 画面座標の中心 c・大きさ w × h・回転 rotationDeg の形の輪郭を描く（トリミング枠の形の表示用） */
+export function strokeShape(
+  ctx: CanvasRenderingContext2D,
+  shape: CropShape,
+  c: Point,
+  w: number,
+  h: number,
+  rotationDeg: number,
+  color: string,
+  width = 1,
+  dash: number[] = [],
+): void {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate((rotationDeg * Math.PI) / 180);
+  ctx.beginPath();
+  addShapePath(ctx, shape, 0, 0, w, h);
+  ctx.setLineDash(dash);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
   ctx.restore();
 }

@@ -56,11 +56,41 @@ export function fitAspect(r: Rect, aspect: number, W: number, H: number): Rect {
   return clampRect({ x: cx - w / 2, y: cy - h / 2, w, h }, W, H);
 }
 
+export interface ResizeOptions {
+  /** 縦横比（元画像の座標での 幅/高さ）。null なら自由 */
+  aspect: number | null;
+  /** true なら中心を固定して拡大縮小（Alt） */
+  fromCenter: boolean;
+}
+
 /**
  * ハンドル (hx, hy) を元画像の座標 (u, v) までドラッグしたときの新しい範囲。
- * aspect を指定すると縦横比を保つ（辺のハンドルでは反対側の辺の中央を基準に両側へ広がる）
+ * - aspect を指定すると縦横比を保つ（辺のハンドルでは、もう一方の向きは中央を基準に両側へ広がる）
+ * - fromCenter なら中心を固定して両側へ広がる
+ * どの場合も元画像の範囲（0〜W, 0〜H）からはみ出さない
  */
-export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: number, aspect: number | null, W: number, H: number): Rect {
+export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: number, opts: ResizeOptions, W: number, H: number): Rect {
+  const { aspect, fromCenter } = opts;
+  const cx0 = r0.x + r0.w / 2;
+  const cy0 = r0.y + r0.h / 2;
+
+  if (fromCenter) {
+    let w = hx !== 0 ? Math.max(1, 2 * Math.abs(u - cx0)) : r0.w;
+    let h = hy !== 0 ? Math.max(1, 2 * Math.abs(v - cy0)) : r0.h;
+    if (aspect) [w, h] = applyAspect(w, h, hx, hy, aspect);
+    const maxW = 2 * Math.min(cx0, W - cx0);
+    const maxH = 2 * Math.min(cy0, H - cy0);
+    if (aspect) {
+      const k = Math.min(1, maxW / w, maxH / h);
+      w *= k;
+      h *= k;
+    } else {
+      w = Math.min(w, maxW);
+      h = Math.min(h, maxH);
+    }
+    return { x: cx0 - w / 2, y: cy0 - h / 2, w, h };
+  }
+
   let l = r0.x;
   let t = r0.y;
   let r = r0.x + r0.w;
@@ -71,19 +101,8 @@ export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: n
   if (hy === -1) t = clamp(v, 0, b - 1);
   if (!aspect) return { x: l, y: t, w: r - l, h: b - t };
 
-  let w = r - l;
-  let h = b - t;
-  if (hx !== 0 && hy !== 0) {
-    if (w / h > aspect) h = w / aspect;
-    else w = h * aspect;
-  } else if (hx !== 0) {
-    h = w / aspect;
-  } else {
-    w = h * aspect;
-  }
-  // 基準点（動かない側）と、そこから広げられる最大サイズ
-  const cx0 = r0.x + r0.w / 2;
-  const cy0 = r0.y + r0.h / 2;
+  let [w, h] = applyAspect(r - l, b - t, hx, hy, aspect);
+  // 基準（動かない側）と、そこから広げられる最大サイズ
   const maxW = hx === 1 ? W - r0.x : hx === -1 ? r0.x + r0.w : 2 * Math.min(cx0, W - cx0);
   const maxH = hy === 1 ? H - r0.y : hy === -1 ? r0.y + r0.h : 2 * Math.min(cy0, H - cy0);
   const k = Math.min(1, maxW / w, maxH / h);
@@ -92,4 +111,22 @@ export function resizeCropRect(r0: Rect, hx: number, hy: number, u: number, v: n
   const x = hx === 1 ? r0.x : hx === -1 ? r0.x + r0.w - w : cx0 - w / 2;
   const y = hy === 1 ? r0.y : hy === -1 ? r0.y + r0.h - h : cy0 - h / 2;
   return { x, y, w, h };
+}
+
+/** 縦横比をそろえる。角は大きい方に合わせ、辺はドラッグしている向きを優先 */
+function applyAspect(w: number, h: number, hx: number, hy: number, aspect: number): [number, number] {
+  if (hx !== 0 && hy !== 0) return w / h > aspect ? [w, w / aspect] : [h * aspect, h];
+  if (hx !== 0) return [w, w / aspect];
+  return [h * aspect, h];
+}
+
+/** 元画像（W × H）の中央に、指定の縦横比で入る最大の範囲（プリセット「正方形」「正円」用） */
+export function maxCenteredRect(W: number, H: number, aspect: number): Rect {
+  let w = W;
+  let h = W / aspect;
+  if (h > H) {
+    h = H;
+    w = H * aspect;
+  }
+  return { x: (W - w) / 2, y: (H - h) / 2, w, h };
 }

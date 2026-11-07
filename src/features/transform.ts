@@ -1,6 +1,6 @@
 // サイズ変更・回転・反転の計算（UIに依存しない）
 
-import { boundsOfPoints, DEG } from '../core/geometry';
+import { boundsOfPoints, DEG, itemBounds, unionRects } from '../core/geometry';
 import type { DocState, Item, Point } from '../core/types';
 
 /** 角度を (-180, 180] に正規化 */
@@ -64,4 +64,21 @@ export function flipEach(d: DocState, ids: readonly string[], axis: 'x' | 'y'): 
     if (axis === 'x') it.flipX = !it.flipX;
     else it.flipY = !it.flipY;
   }
+}
+
+/**
+ * キャンバスを指定アイテムの範囲（回転込みの外接矩形）に合わせる。
+ * アイテムの見た目の位置関係は変えず、範囲の左上がキャンバスの原点に来るよう全アイテムをずらす。
+ * @returns 合わせられたら true（対象がなければ false）
+ */
+export function fitCanvasToItems(d: DocState, ids: readonly string[]): boolean {
+  const b = unionRects(d.items.filter((it) => ids.includes(it.id) && it.visible).map(itemBounds));
+  if (!b || b.w < 0.5 || b.h < 0.5) return false;
+  for (const it of d.items) {
+    it.cx -= b.x;
+    it.cy -= b.y;
+  }
+  d.canvas.width = Math.max(1, Math.round(b.w));
+  d.canvas.height = Math.max(1, Math.round(b.h));
+  return true;
 }
