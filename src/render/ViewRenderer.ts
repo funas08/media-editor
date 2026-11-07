@@ -4,7 +4,8 @@
 import type { AssetStore } from '../core/AssetStore';
 import type { DocState } from '../core/types';
 import type { CropShape } from '../core/types';
-import { drawItems } from './scene';
+import type { VideoFrameProvider } from './itemRenderers';
+import { drawItems, withTimes } from './scene';
 import { addShapePath } from './shapes';
 import type { View } from './view';
 
@@ -16,6 +17,9 @@ export interface RenderFrame {
   overlay?: (ctx: CanvasRenderingContext2D) => void;
   /** キャンバスとして表示する範囲と形（省略時はドキュメントのキャンバス）。キャンバスのトリミングのプレビュー用 */
   canvasArea?: CanvasArea | null;
+  /** 表示する時刻（秒）と、動画のフレーム */
+  time?: number;
+  frames?: VideoFrameProvider;
 }
 
 export interface CanvasArea {
@@ -70,7 +74,7 @@ export class CanvasSceneView implements SceneView {
     this.canvas.style.height = `${this.cssH}px`;
   }
 
-  render({ doc, assets, view, overlay, canvasArea }: RenderFrame): void {
+  render({ doc, assets, view, overlay, canvasArea, time, frames }: RenderFrame): void {
     // 別モニターへの移動などで DPR が変わったら作り直す
     if ((window.devicePixelRatio || 1) !== this.dpr) this.resize(this.cssW, this.cssH);
     const { ctx, dpr } = this;
@@ -110,7 +114,7 @@ export class CanvasSceneView implements SceneView {
 
     // キャンバス座標で描く
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * sx, dpr * sy);
-    const env = { assets, pixelScale: dpr * z, pixelated: true };
+    const env = withTimes(doc, { assets, pixelScale: dpr * z, pixelated: true, time, frames });
 
     // はみ出した部分（薄く）
     ctx.save();

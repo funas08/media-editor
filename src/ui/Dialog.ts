@@ -7,7 +7,15 @@ export interface DialogHandle {
   close(): void;
 }
 
-export function openDialog(opts: { title: string; body: HTMLElement; actions?: HTMLElement[]; wide?: boolean; onClose?: () => void }): DialogHandle {
+export function openDialog(opts: {
+  title: string;
+  body: HTMLElement;
+  actions?: HTMLElement[];
+  wide?: boolean;
+  onClose?: () => void;
+  /** false を返す間は閉じない（書き出し中など） */
+  canClose?: () => boolean;
+}): DialogHandle {
   const closeBtn = h('button', { class: 'icon-btn dialog-close', type: 'button', 'aria-label': '閉じる', html: '&times;' });
   const dlg = h(
     'dialog',
@@ -17,12 +25,17 @@ export function openDialog(opts: { title: string; body: HTMLElement; actions?: H
     opts.actions?.length ? h('footer', { class: 'dialog-actions' }, ...opts.actions) : null,
   ) as HTMLDialogElement;
   const close = () => {
+    if (opts.canClose && !opts.canClose()) return;
     if (dlg.open) dlg.close();
   };
   closeBtn.addEventListener('click', close);
   // 背景（ダイアログの外側）のクリックで閉じる
   dlg.addEventListener('click', (e) => {
     if (e.target === dlg) close();
+  });
+  // Esc で閉じるときも canClose を確認する
+  dlg.addEventListener('cancel', (e) => {
+    if (opts.canClose && !opts.canClose()) e.preventDefault();
   });
   dlg.addEventListener('close', () => {
     dlg.remove();

@@ -3,10 +3,10 @@
 // （元画像のどの点がキャンバスのどこに来るか、という対応を保ったまま crop と中心を変える）。
 
 import { clamp, DEG, toLocal } from '../core/geometry';
-import type { CropShape, DocState, ImageItem, Point, Rect } from '../core/types';
+import type { CropShape, DocState, MediaItem, Point, Rect } from '../core/types';
 
 /** 元画像の座標 (u, v) → キャンバス座標 */
-export function sourceToDoc(it: ImageItem, u: number, v: number): Point {
+export function sourceToDoc(it: MediaItem, u: number, v: number): Point {
   const lx = (u - (it.crop.x + it.crop.w / 2)) * it.scaleX * (it.flipX ? -1 : 1);
   const ly = (v - (it.crop.y + it.crop.h / 2)) * it.scaleY * (it.flipY ? -1 : 1);
   const c = Math.cos(it.rotation * DEG);
@@ -15,7 +15,7 @@ export function sourceToDoc(it: ImageItem, u: number, v: number): Point {
 }
 
 /** キャンバス座標 → 元画像の座標 */
-export function docToSource(it: ImageItem, p: Point): Point {
+export function docToSource(it: MediaItem, p: Point): Point {
   const l = toLocal(it, p);
   return {
     x: it.crop.x + it.crop.w / 2 + l.x / (it.scaleX * (it.flipX ? -1 : 1)),
@@ -24,16 +24,16 @@ export function docToSource(it: ImageItem, p: Point): Point {
 }
 
 /** 元画像の位置関係を保ったまま、トリミング範囲だけを rect に変えたアイテム */
-export function withCrop(orig: ImageItem, rect: Rect): ImageItem {
+export function withCrop<T extends MediaItem>(orig: T, rect: Rect): T {
   const c = sourceToDoc(orig, rect.x + rect.w / 2, rect.y + rect.h / 2);
   return { ...orig, crop: { ...rect }, cx: c.x, cy: c.y };
 }
 
-export function fullRect(it: ImageItem): Rect {
+export function fullRect(it: MediaItem): Rect {
   return { x: 0, y: 0, w: it.srcWidth, h: it.srcHeight };
 }
 
-export function isFullRect(it: ImageItem, r: Rect): boolean {
+export function isFullRect(it: MediaItem, r: Rect): boolean {
   const e = 0.01;
   return Math.abs(r.x) < e && Math.abs(r.y) < e && Math.abs(r.w - it.srcWidth) < e && Math.abs(r.h - it.srcHeight) < e;
 }

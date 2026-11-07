@@ -65,7 +65,7 @@ registerTool({
 
   onPointerDown(e, host) {
     const { editor } = host;
-    const hit = topItemAt(editor.doc.items, e.doc);
+    const hit = topItemAt(editor.doc.items, e.doc, false, (it) => host.isShown(it));
     if (!hit) {
       // 何もない所から範囲選択
       const base = e.shift ? [...editor.selection] : [];
@@ -103,7 +103,7 @@ registerTool({
   onPointerMove(e, host) {
     const { editor, view } = host;
     if (!drag) {
-      const id = topItemAt(editor.doc.items, e.doc)?.id ?? null;
+      const id = topItemAt(editor.doc.items, e.doc, false, (it) => host.isShown(it))?.id ?? null;
       if (id !== hoverId) {
         hoverId = id;
         host.requestRender();
@@ -113,7 +113,7 @@ registerTool({
     if (drag.kind === 'marquee') {
       drag.cur = e.doc;
       const r = normalizeRect(drag.start, drag.cur);
-      const hits = editor.doc.items.filter((it) => it.visible && !it.locked && rectsIntersect(itemBounds(it), r)).map((it) => it.id);
+      const hits = editor.doc.items.filter((it) => it.visible && !it.locked && host.isShown(it) && rectsIntersect(itemBounds(it), r)).map((it) => it.id);
       editor.setSelection([...drag.base, ...hits]);
       return;
     }
@@ -169,7 +169,7 @@ registerTool({
 
   // 画像のダブルクリックでトリミングを開始
   onDoubleClick(e, host) {
-    const hit = topItemAt(host.editor.doc.items, e.doc);
+    const hit = topItemAt(host.editor.doc.items, e.doc, false, (it) => host.isShown(it));
     if (!hit || hit.type !== 'image') return;
     host.editor.setSelection([hit.id]);
     host.setTool('crop', { target: 'image' });
@@ -194,7 +194,8 @@ registerTool({
     const dir = dirs[e.key];
     if (!dir || e.ctrlKey || e.metaKey || e.altKey) return false;
     const ids = editableSelection(editor).map((it) => it.id);
-    if (ids.length === 0) return true;
+    // 何も選択していないときは処理しない（動画モードでは1コマ移動に使う）
+    if (ids.length === 0) return false;
     // 押し続けている間は1回分の履歴にまとめる（キーを離したら確定）
     if (!nudging) {
       editor.begin('移動（矢印キー）');

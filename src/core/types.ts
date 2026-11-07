@@ -54,11 +54,9 @@ export interface ItemBase {
   flipY: boolean;
 }
 
-/** 画像アイテム。元画像は AssetStore にあり、ここでは参照とパラメータだけを持つ */
-export interface ImageItem extends ItemBase {
-  type: 'image';
-  assetId: string;
-  /** 元画像のサイズ（AssetStore を見なくても計算できるように保持） */
+/** 画像・動画に共通の属性（変形・切り抜き・色調補正。画像モードのツールをそのまま使えるようにする） */
+export interface MediaItemBase extends ItemBase {
+  /** 元の画像・動画のサイズ（表示上のピクセル数） */
   srcWidth: number;
   srcHeight: number;
   /** 実際に描画する元画像上の範囲 */
@@ -76,8 +74,34 @@ export interface ImageItem extends ItemBase {
   adjust: Adjust;
 }
 
+/** 画像アイテム。元画像は AssetStore にあり、ここでは参照とパラメータだけを持つ */
+export interface ImageItem extends MediaItemBase {
+  type: 'image';
+  assetId: string;
+}
+
+/**
+ * 動画クリップ。元動画は MediaStore（ブラウザの中のファイル参照）にあり、ここでは参照と使う範囲だけを持つ。
+ * 動画トラックの並び順は items の中での動画クリップの並び順で、先頭から隙間なく順に再生する
+ */
+export interface VideoItem extends MediaItemBase {
+  type: 'video';
+  mediaId: string;
+  /** 元動画で使う範囲の開始（秒） */
+  inPoint: number;
+  /** 元動画で使う範囲の終了（秒） */
+  outPoint: number;
+  /** 再生速度（1 = 等速） */
+  speed: number;
+  /** 元の音声の音量（1 = そのまま） */
+  volume: number;
+  /** 元の音声をミュート */
+  muted: boolean;
+}
+
 /** アイテムの種類を増やすときはここにユニオンで追加する */
-export type Item = ImageItem;
+export type Item = ImageItem | VideoItem;
+export type MediaItem = ImageItem | VideoItem;
 export type ItemType = Item['type'];
 
 export interface CanvasSettings {

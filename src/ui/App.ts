@@ -1,13 +1,16 @@
 // アプリ全体の組み立て：Editor・表示・ツール・UI をつなぎ、入力（マウス・キーボード・D&D・貼り付け）を振り分ける
 
 import { Editor } from '../core/Editor';
-import type { Point } from '../core/types';
+import { createDoc, createVideoItem } from '../core/doc';
+import { isItemShownAt, totalDuration, videoTimesAt } from '../core/timeline';
+import type { Item, Point } from '../core/types';
 import {
   addImageItems,
   blankDocument,
   deleteSelected,
   documentFromImage,
   duplicateSelected,
+  editableSelection,
   loadAssets,
   moveLayers,
   selectAll,
@@ -19,6 +22,9 @@ import { LocalFileProjectStorage, type ProjectStorage } from '../io/ProjectStora
 import type { DocState } from '../core/types';
 import { ACCENT, strokeItem } from '../render/overlay';
 import { CanvasSceneView } from '../render/ViewRenderer';
+import { MediaLoadError, MediaStore, isVideoFile, type MediaEntry } from '../media/MediaStore';
+import { Player } from '../media/Player';
+import { PreviewFrames } from '../media/PreviewFrames';
 import { View } from '../render/view';
 import { getTool, getTools } from '../tools/registry';
 import type { Tool, ToolActivateOptions, ToolHost, ToolPointerEvent } from '../tools/Tool';
@@ -32,7 +38,9 @@ import { openShortcutsDialog } from './ShortcutsDialog';
 import { openStartDialog } from './StartDialog';
 import { StatusBar } from './StatusBar';
 import { Toaster } from './toast';
-import { TopBar } from './TopBar';
+import { Timeline } from './Timeline';
+import { TopBar, type EditorMode } from './TopBar';
+import { openVideoExportDialog } from './VideoExportDialog';
 
 export class App implements ToolHost {
   readonly editor = new Editor();
@@ -47,6 +55,20 @@ export class App implements ToolHost {
   private layers: LayerPanel;
   private status = new StatusBar();
   private toaster = new Toaster();
+
+  // ---- 動画モード ----
+  readonly media = new MediaStore();
+  private player = new Player(this.media);
+  private frames: PreviewFrames;
+  private timeline: Timeline;
+  private mode: EditorMode = 'image';
+  /** タイムラインを最後に操作した（← → を1コマ移動に使う） */
+  private timelineFocused = false;
+  /** Space を押している間にパンしたか（しなかったら離したときに再生／停止） */
+  private spacePanned = false;
+  /** 1コマ移動の単位（fps） */
+  private stepFps = 30;
+  private playLoop = 0;
 
   private renderQueued = false;
   private fitted = false;
@@ -70,7 +92,9 @@ export class App implements ToolHost {
     this.savedDoc = this.editor.doc;
 
     // ---- 画面の組み立て ----
+    this.frames = new PreviewFrames(this.media, () => this.requestRender());
     this.topBar = new TopBar({
+      setMode: (m) => this.setMode(m),
       newDoc: () => this.newDocument(),
       addImages: () => void this.addImagesFromPicker(),
       open: () => void this.openFromPicker(),
@@ -105,13 +129,28 @@ export class App implements ToolHost {
     );
     this.viewport = h('main', { class: 'viewport' }, canvas, this.emptyState);
 
+    this.timeline = new Timeline({
+      editor: this.editor,
+      media: this.media,
+      getTime: () => this.player.time,
+      seek: (t) => this.seek(t),
+      togglePlay: () => this.togglePlay(),
+      isPlaying: () => this.player.isPlaying,
+      addVideos: () => void this.addVideosFromPicker(),
+      focusTimeline: () => (this.timelineFocused = true),
+    });
+    this.timeline.el.hidden = true;
+
     root.replaceChildren(
-      h('div', { class: 'app' }, this.topBar.el, this.left.el, this.viewport, this.status.el),
+      h('div', { class: 'app' }, this.topBar.el, this.left.el, this.viewport, this.timeline.el, this.status.el),
       this.toaster.el,
     );
+    this.topBar.setMode(this.mode);
 
     // ---- イベント ----
-    this.editor.changed.on(() => {
+    this.editor.changed.on((ev) => {
+      // 再生中に編集を確定したら、新しい内容で音声を並べ直す
+      if (ev.history && this.player.isPlaying) this.player.seek(this.editor.doc, this.player.time);
       // キャンバスのサイズが変わったら（トリミングの確定・元に戻すなど）全体表示にする
       const c = this.editor.doc.canvas;
       if (c.width !== this.lastCanvasSize.w || c.height !== this.lastCanvasSize.h) {
@@ -199,8 +238,12 @@ export class App implements ToolHost {
 
   private renderNow(): void {
     const doc = this.tool.getPreview?.(this.editor.doc, this) ?? this.editor.doc;
+    const time = this.player.time;
+    const times = videoTimesAt(doc, time);
     this.scene.render({
       doc,
+      time,
+      frames: this.frames,
       canvasArea: this.tool.getCanvasArea?.(this.editor.doc, this) ?? null,
       assets: this.editor.assets,
       view: this.view,
@@ -208,7 +251,7 @@ export class App implements ToolHost {
         // 選択枠（どのツールでも表示）
         for (const id of this.editor.selection) {
           const it = doc.items.find((x) => x.id === id);
-          if (it && it.visible) strokeItem(ctx, this.view, it, ACCENT, 1.5);
+          if (it && it.visible && isItemShownAt(it, times)) strokeItem(ctx, this.view, it, ACCENT, 1.5);
         }
         this.tool.drawOverlay?.(ctx, this);
       },
@@ -222,7 +265,74 @@ export class App implements ToolHost {
       canvasH: this.editor.doc.canvas.height,
       selected: this.editor.selection.length,
       total: this.editor.doc.items.length,
+      time: this.mode === 'video' ? time : null,
     });
+    if (this.mode === 'video') this.timeline.draw();
+  }
+
+  // ===== 動画モード：モード切り替え・再生 =====
+
+  isShown(it: Item): boolean {
+    return isItemShownAt(it, videoTimesAt(this.editor.doc, this.player.time));
+  }
+
+  setMode(mode: EditorMode): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    if (mode === 'image') this.player.pause();
+    this.timeline.el.hidden = mode !== 'video';
+    this.topBar.setMode(mode);
+    this.timelineFocused = false;
+    this.refreshUI();
+  }
+
+  private togglePlay(): void {
+    if (this.player.isPlaying) {
+      this.player.pause();
+      this.requestRender();
+      return;
+    }
+    const duration = totalDuration(this.editor.doc);
+    if (duration <= 0) {
+      this.toast('再生する動画がありません');
+      return;
+    }
+    // 最後まで再生していたら先頭から
+    const from = this.player.time >= duration - 1e-3 ? 0 : this.player.time;
+    void this.player.play(this.editor.doc, from);
+    this.startPlayLoop();
+  }
+
+  /** 再生中は毎フレーム描き直し、最後まで来たら止める */
+  private startPlayLoop(): void {
+    cancelAnimationFrame(this.playLoop);
+    const tick = () => {
+      if (!this.player.isPlaying) {
+        this.requestRender();
+        return;
+      }
+      const duration = totalDuration(this.editor.doc);
+      if (this.player.time >= duration) {
+        this.player.pause();
+        this.player.seek(this.editor.doc, duration);
+      }
+      this.renderNow();
+      this.playLoop = requestAnimationFrame(tick);
+    };
+    this.playLoop = requestAnimationFrame(tick);
+  }
+
+  private seek(t: number): void {
+    const duration = totalDuration(this.editor.doc);
+    this.player.seek(this.editor.doc, Math.min(Math.max(0, t), duration));
+    this.requestRender();
+  }
+
+  /** 1コマ進める・戻す */
+  private stepFrame(dir: 1 | -1, frames = 1): void {
+    this.player.pause();
+    const t = Math.round(this.player.time * this.stepFps + dir * frames) / this.stepFps;
+    this.seek(t);
   }
 
   // ===== ズーム =====
@@ -259,8 +369,10 @@ export class App implements ToolHost {
       // 入力欄からフォーカスを外して、ショートカットが効くようにする
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       const te = this.toolEvent(e);
+      this.timelineFocused = false;
       if (e.button === 1 || (e.button === 0 && this.spaceDown)) {
         e.preventDefault();
+        if (this.spaceDown) this.spacePanned = true;
         vp.setPointerCapture(e.pointerId);
         this.panning = { last: te.screen, pointerId: e.pointerId };
         this.updateCursor();
@@ -342,9 +454,19 @@ export class App implements ToolHost {
         e.preventDefault();
         if (!this.spaceDown) {
           this.spaceDown = true;
+          this.spacePanned = false;
           this.updateCursor();
         }
         return;
+      }
+      // 動画モードの ← →：タイムラインを操作した後や、画像を選択していないときは1コマ移動（Shift で1秒）
+      if (this.mode === 'video' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (this.timelineFocused || editableSelection(this.editor).length === 0) {
+          e.preventDefault();
+          const dir = e.key === 'ArrowRight' ? 1 : -1;
+          this.stepFrame(dir, e.shiftKey ? this.stepFps : 1);
+          return;
+        }
       }
       // ツール固有のキー操作が優先
       if (this.tool.onKeyDown?.(e, this)) {
@@ -445,6 +567,8 @@ export class App implements ToolHost {
       if (e.code === 'Space' && this.spaceDown) {
         this.spaceDown = false;
         this.updateCursor();
+        // 動画モード：Space を押してドラッグせずに離したら再生／停止
+        if (this.mode === 'video' && !this.spacePanned && !isDialogOpen() && !isTypingTarget(e)) this.togglePlay();
       }
     });
     window.addEventListener('blur', () => {
@@ -472,8 +596,14 @@ export class App implements ToolHost {
       if (isDialogOpen()) return;
       const files = filesFromDrop(e);
       const project = files.find((f) => f.name.toLowerCase().endsWith(PROJECT_EXT));
-      if (project) void this.loadProject(project);
-      else void this.addFiles(files);
+      if (project) {
+        void this.loadProject(project);
+        return;
+      }
+      const videos = files.filter(isVideoFile);
+      const others = files.filter((f) => !isVideoFile(f));
+      if (videos.length > 0) void this.addVideoFiles(videos);
+      if (others.length > 0) void this.addFiles(others);
     });
     // 保存していない変更があるときは、ページを閉じる前に確認する
     window.addEventListener('beforeunload', (e) => {
@@ -486,6 +616,75 @@ export class App implements ToolHost {
       e.preventDefault();
       void this.addFiles(files);
     });
+  }
+
+  // ===== 動画の追加 =====
+
+  private async addVideosFromPicker(): Promise<void> {
+    const files = await pickFiles('video/*,.mp4,.mov,.m4v,.webm,.mkv', true);
+    await this.addVideoFiles(files);
+  }
+
+  /** 動画を読み込む（読めなかったファイルは理由を表示） */
+  private async loadVideos(files: File[]): Promise<MediaEntry[]> {
+    const loaded: MediaEntry[] = [];
+    for (const f of files) {
+      try {
+        loaded.push(await this.media.add(f));
+      } catch (e) {
+        this.toast(`${f.name}：${e instanceof MediaLoadError ? e.message : '読み込めませんでした'}`);
+      }
+    }
+    return loaded;
+  }
+
+  /** 動画を動画トラックの最後に追加する（キャンバスに収まる大きさで中央に置く） */
+  async addVideoFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    const loaded = await this.loadVideos(files);
+    if (loaded.length === 0) return;
+    const ids: string[] = [];
+    this.editor.update(loaded.length > 1 ? `動画を追加（${loaded.length}本）` : '動画を追加', (d) => {
+      const { width: W, height: H } = d.canvas;
+      // 動画は画像より下（奥）に置く：最後の動画クリップの直後に入れる
+      let at = 0;
+      d.items.forEach((it, i) => {
+        if (it.type === 'video') at = i + 1;
+      });
+      for (const m of loaded) {
+        const scale = Math.min(W / m.info.width, H / m.info.height);
+        const item = createVideoItem(m.info, W / 2, H / 2, scale);
+        d.items.splice(at++, 0, item);
+        ids.push(item.id);
+      }
+    });
+    this.editor.setSelection(ids);
+    this.setMode('video');
+    this.toast(`${loaded.length}本の動画を追加しました`);
+  }
+
+  /** 動画を編集：1本目の動画のサイズのキャンバスで、動画モードの新しいドキュメントにする */
+  private async openVideosAsNew(files?: File[]): Promise<boolean> {
+    const list = (files ?? (await pickFiles('video/*,.mp4,.mov,.m4v,.webm,.mkv', true))).filter(isVideoFile);
+    if (list.length === 0) {
+      if (files) this.toast('動画ファイルではありません');
+      return false;
+    }
+    const loaded = await this.loadVideos(list);
+    if (loaded.length === 0) return false;
+    const first = loaded[0].info;
+    const doc = createDoc(first.width - (first.width % 2), first.height - (first.height % 2));
+    doc.canvas.background = '#000000';
+    // 動画クリップを入れてから差し替える（先に差し替えると、読み込んだ動画が「未使用」として解放されるため）
+    for (const m of loaded) {
+      const scale = Math.min(doc.canvas.width / m.info.width, doc.canvas.height / m.info.height);
+      doc.items.push(createVideoItem(m.info, doc.canvas.width / 2, doc.canvas.height / 2, scale));
+    }
+    this.replaceDocument(doc, null);
+    this.stepFps = Math.round(first.fps) >= 50 ? 60 : 30;
+    this.setMode('video');
+    this.toast(`${loaded.length}本の動画を開きました（${doc.canvas.width}×${doc.canvas.height}）`);
+    return true;
   }
 
   // ===== ファイル操作 =====
@@ -518,8 +717,14 @@ export class App implements ToolHost {
 
   /** ドキュメントを丸ごと差し替える（新規作成・画像を開く・プロジェクトを開く） */
   private replaceDocument(doc: DocState, projectName: string | null): void {
+    this.player.pause();
+    this.player.seek(doc, 0);
     this.editor.reset(doc);
     this.editor.assets.retainOnly(usedAssetIds(doc));
+    const mediaIds = new Set(doc.items.flatMap((it) => (it.type === 'video' ? [it.mediaId] : [])));
+    this.media.retainOnly(mediaIds);
+    this.frames.retainOnly(mediaIds);
+    this.setMode(mediaIds.size > 0 ? 'video' : 'image');
     this.savedDoc = this.editor.doc;
     this.projectName = projectName;
     if (projectName === null) this.storage.forget();
@@ -542,6 +747,7 @@ export class App implements ToolHost {
         return files.length > 0 ? this.openImagesAsNew(files) : false;
       },
       openProject: (file) => this.loadProject(file, false),
+      openVideos: (files) => this.openVideosAsNew(files),
       newBlank: (opts) => {
         this.replaceDocument(blankDocument(opts), null);
         this.toast(`${opts.width}×${opts.height} のキャンバスを作成しました`);
@@ -583,7 +789,16 @@ export class App implements ToolHost {
 
   private openExport(): void {
     this.editor.commit();
-    openExportDialog(this.editor, (m) => this.toast(m));
+    if (this.mode === 'video') {
+      this.player.pause();
+      if (totalDuration(this.editor.doc) <= 0) {
+        this.toast('書き出す動画がありません。動画を追加してください');
+        return;
+      }
+      openVideoExportDialog(this.editor.doc, this.editor.assets, this.media, (m) => this.toast(m));
+    } else {
+      openExportDialog(this.editor, (m) => this.toast(m));
+    }
   }
 
   // ===== プロジェクトの保存・読み込み =====
@@ -595,6 +810,7 @@ export class App implements ToolHost {
       const project = await buildProject(doc, this.editor.assets);
       const name = await this.storage.save(project, { suggestedName: this.projectName ?? defaultProjectName(), saveAs });
       if (!name) return;
+      if (doc.items.some((it) => it.type === 'video')) this.toast('動画クリップを含むプロジェクトの保存・読み込みは V4 で対応します（今は動画を除いた状態で保存されます）');
       this.projectName = name;
       this.savedDoc = doc;
       this.refreshUI();

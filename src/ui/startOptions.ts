@@ -9,6 +9,8 @@ export interface StartContext {
   pickImage(): Promise<boolean>;
   /** プロジェクト（.json）を開く。file がなければ選択ダイアログ */
   openProject(file?: File): Promise<boolean>;
+  /** 動画を編集：動画を選ぶ（またはドロップされた）と、動画モードの新しいドキュメントになる */
+  openVideos(files?: File[]): Promise<boolean>;
   /** 白紙のキャンバスを作る */
   newBlank(opts: { width: number; height: number; background: string; transparent: boolean }): void;
   /** 起動画面を閉じる */

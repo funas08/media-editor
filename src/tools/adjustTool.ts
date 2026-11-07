@@ -1,6 +1,6 @@
 // 色調補正(A)：明るさ・コントラスト・彩度・色相・グレースケール・ぼかし（非破壊、画像ごと）
 
-import { DEFAULT_ADJUST, isImage } from '../core/doc';
+import { DEFAULT_ADJUST, isMedia } from '../core/doc';
 import type { Adjust } from '../core/types';
 import { editableSelection } from '../features/commands';
 import { button, group, h, hint, slider, text } from '../ui/controls';
@@ -29,7 +29,7 @@ const SLIDERS: SliderDef[] = [
 
 function targetIds(host: ToolHost): string[] {
   return editableSelection(host.editor)
-    .filter(isImage)
+    .filter(isMedia)
     .map((it) => it.id);
 }
 
@@ -40,7 +40,7 @@ function setValue(host: ToolHost, key: keyof Adjust, v: number, final: boolean):
   if (ids.length === 0) return;
   if (!editor.inTransaction) editor.begin('色調補正');
   editor.preview((d) => {
-    for (const it of d.items) if (ids.includes(it.id) && isImage(it)) it.adjust[key] = v;
+    for (const it of d.items) if (ids.includes(it.id) && isMedia(it)) it.adjust[key] = v;
   });
   if (final) editor.commit();
 }
@@ -83,7 +83,7 @@ registerTool({
       () => {
         const ids = targetIds(host);
         editor.update('色調補正をリセット', (d) => {
-          for (const it of d.items) if (ids.includes(it.id) && isImage(it)) it.adjust = { ...DEFAULT_ADJUST };
+          for (const it of d.items) if (ids.includes(it.id) && isMedia(it)) it.adjust = { ...DEFAULT_ADJUST };
         });
       },
       { icon: icons.undo },
@@ -100,7 +100,7 @@ registerTool({
     );
 
     const update = () => {
-      const items = editableSelection(editor).filter(isImage);
+      const items = editableSelection(editor).filter(isMedia);
       const first = items[0];
       info.set(items.length === 0 ? '画像を選択してください' : items.length === 1 ? first.name : `${items.length}枚（表示は1枚目の値）`);
       resetBtn.disabled = !first;

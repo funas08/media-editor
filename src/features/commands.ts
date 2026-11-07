@@ -70,11 +70,15 @@ export function selectAll(editor: Editor): void {
   editor.setSelection(editor.doc.items.filter((it) => it.visible && !it.locked).map((it) => it.id));
 }
 
-/** 指定位置にある一番上のアイテム（非表示・ロック中は除く） */
-export function topItemAt(items: readonly Item[], p: Point, includeLocked = false): Item | undefined {
+/**
+ * 指定位置にある一番上のアイテム（非表示・ロック中は除く）。
+ * shown を渡すと、それが false のアイテム（今の時刻に表示されていない動画クリップなど）も除く
+ */
+export function topItemAt(items: readonly Item[], p: Point, includeLocked = false, shown?: (it: Item) => boolean): Item | undefined {
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i];
     if (!it.visible || (!includeLocked && it.locked)) continue;
+    if (shown && !shown(it)) continue;
     if (hitTest(it, p)) return it;
   }
   return undefined;

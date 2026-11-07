@@ -920,3 +920,88 @@ kbd {
   outline: 3px dashed var(--accent);
   outline-offset: -6px;
 }
+
+/* ---------- 動画モード ---------- */
+.app {
+  grid-template-rows: 44px 1fr auto 26px;
+  grid-template-areas:
+    'top top'
+    'left main'
+    'left timeline'
+    'status status';
+}
+
+.mode-switch {
+  margin-right: 8px;
+}
+
+.mode-switch .seg-btn {
+  min-width: 52px;
+  height: 28px;
+}
+
+.segmented.disabled {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.timeline {
+  grid-area: timeline;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.tl-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-header .btn {
+  height: 28px;
+  margin: 0;
+}
+
+.tl-play {
+  width: 36px;
+  padding: 0;
+}
+
+.tl-time {
+  min-width: 150px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.tl-spacer {
+  flex: 1;
+}
+
+.tl-body {
+  position: relative;
+  overflow: hidden;
+}
+
+.tl-canvas {
+  display: block;
+  cursor: text;
+}
+
+.progress-wrap {
+  margin: 8px 0;
+}
+
+.progress {
+  width: 100%;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
+.hint.warn,
+.warn {
+  white-space: pre-line;
+}

@@ -8,6 +8,7 @@ export const DEG = Math.PI / 180;
 export function itemSize(it: Item): { w: number; h: number } {
   switch (it.type) {
     case 'image':
+    case 'video':
       return { w: it.crop.w * it.scaleX, h: it.crop.h * it.scaleY };
   }
 }

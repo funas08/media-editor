@@ -5,7 +5,10 @@ import type { View } from '../render/view';
 import { h } from './controls';
 import { icons } from './icons';
 
+export type EditorMode = 'image' | 'video';
+
 export interface TopBarActions {
+  setMode(mode: EditorMode): void;
   newDoc(): void;
   addImages(): void;
   open(): void;
@@ -38,6 +41,7 @@ export class TopBar {
   private redoBtn: HTMLButtonElement;
   private zoomBtn: HTMLButtonElement;
   readonly saveBtn: HTMLButtonElement;
+  private modeBtns: Record<EditorMode, HTMLButtonElement>;
 
   constructor(a: TopBarActions) {
     this.undoBtn = barButton(icons.undo, null, '元に戻す（Ctrl+Z）', a.undo);
@@ -46,10 +50,17 @@ export class TopBar {
     this.zoomBtn.addEventListener('mousedown', (e) => e.preventDefault());
     this.saveBtn = barButton(icons.save, '保存', 'プロジェクトを保存（Ctrl+S、名前を付けて保存は Ctrl+Shift+S）', a.save);
 
+    const modeBtn = (m: EditorMode, label: string, title: string) => {
+      const b = h('button', { class: 'seg-btn', type: 'button', title, onclick: () => a.setMode(m) }, label) as HTMLButtonElement;
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      return b;
+    };
+    this.modeBtns = { image: modeBtn('image', '画像', '画像モード'), video: modeBtn('video', '動画', '動画モード（タイムラインを表示）') };
     this.el = h(
       'header',
       { class: 'topbar' },
       h('div', { class: 'brand' }, '画像エディタ'),
+      h('div', { class: 'segmented mode-switch', role: 'group', 'aria-label': 'モード' }, this.modeBtns.image, this.modeBtns.video),
       h(
         'div',
         { class: 'tb-group' },
@@ -81,6 +92,10 @@ export class TopBar {
     this.undoBtn.title = editor.undoLabel ? `元に戻す：${editor.undoLabel}（Ctrl+Z）` : '元に戻す（Ctrl+Z）';
     this.redoBtn.title = editor.redoLabel ? `やり直し：${editor.redoLabel}（Ctrl+Shift+Z）` : 'やり直し（Ctrl+Shift+Z）';
     this.updateZoom(view);
+  }
+
+  setMode(mode: EditorMode): void {
+    for (const [m, b] of Object.entries(this.modeBtns)) b.classList.toggle('active', m === mode);
   }
 
   updateZoom(view: View): void {

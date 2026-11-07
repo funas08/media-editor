@@ -9,7 +9,7 @@ import type { ToolHost, ToolPointerEvent } from './Tool';
 /** クリック位置の画像を選択する（Shift で追加・解除）。何もない所なら選択解除 */
 export function selectAt(e: ToolPointerEvent, host: ToolHost): Item | undefined {
   const { editor } = host;
-  const hit = topItemAt(editor.doc.items, e.doc);
+  const hit = topItemAt(editor.doc.items, e.doc, false, (it) => host.isShown(it));
   if (!hit) {
     if (!e.shift) editor.setSelection([]);
     return undefined;

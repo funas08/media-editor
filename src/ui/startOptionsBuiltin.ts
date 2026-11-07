@@ -81,6 +81,15 @@ registerStartOption({
 });
 
 registerStartOption({
+  id: 'edit-video',
+  title: '動画を編集',
+  description: '動画を選ぶと、動画モード（タイムライン付き）で始まります。キャンバスは1本目の動画のサイズになります',
+  icon: icons.film,
+  order: 25,
+  activate: (ctx) => ctx.openVideos(),
+});
+
+registerStartOption({
   id: 'open-project',
   title: 'プロジェクトを開く',
   description: '保存したプロジェクト（.json）を開きます',

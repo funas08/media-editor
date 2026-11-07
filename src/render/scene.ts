@@ -1,5 +1,6 @@
 // ドキュメント全体の描画（表示・書き出しで共通）
 
+import { isItemShownAt, videoTimesAt } from '../core/timeline';
 import type { DocState, Item } from '../core/types';
 import { getItemRenderer, type Ctx2D, type DrawEnv } from './itemRenderers';
 import { addShapePath } from './shapes';
@@ -13,15 +14,23 @@ export function drawBackground(ctx: Ctx2D, doc: DocState): void {
   ctx.restore();
 }
 
+/** 描く時刻の動画クリップを決めた env を作る（time がなければ 0 秒） */
+export function withTimes(doc: DocState, env: DrawEnv): DrawEnv {
+  return env.videoTimes ? env : { ...env, videoTimes: videoTimesAt(doc, env.time ?? 0) };
+}
+
+/** アイテムを描く。env.videoTimes がある場合、その時刻に表示しない動画クリップは描かない */
 export function drawItems(ctx: Ctx2D, items: readonly Item[], env: DrawEnv): void {
   for (const it of items) {
     if (!it.visible) continue;
+    if (env.videoTimes && !isItemShownAt(it, env.videoTimes)) continue;
     getItemRenderer(it.type)?.draw(ctx, it, env);
   }
 }
 
 /** キャンバス座標系で背景とアイテムを描く（キャンバスが角丸・楕円なら形の外側は描かない＝透明） */
-export function drawScene(ctx: Ctx2D, doc: DocState, env: DrawEnv): void {
+export function drawScene(ctx: Ctx2D, doc: DocState, envIn: DrawEnv): void {
+  const env = withTimes(doc, envIn);
   const { width: W, height: H, shape } = doc.canvas;
   const shaped = shape.kind !== 'rect';
   if (shaped) {

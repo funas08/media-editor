@@ -59,6 +59,6 @@ test('白紙から作成：サイズ・背景色・透明', () => {
   assert.deepEqual([doc.canvas.width, doc.canvas.height, doc.canvas.background, doc.canvas.transparent, doc.items.length], [3840, 2160, '#112233', true, 0]);
 });
 
-test('起動画面の選択肢は登録順（画像を開く・白紙から作成・プロジェクトを開く）', () => {
-  assert.deepEqual(getStartOptions().map((o) => o.id), ['open-image', 'blank', 'open-project']);
+test('起動画面の選択肢は登録順（画像を開く・白紙から作成・動画を編集・プロジェクトを開く）', () => {
+  assert.deepEqual(getStartOptions().map((o) => o.id), ['open-image', 'blank', 'edit-video', 'open-project']);
 });

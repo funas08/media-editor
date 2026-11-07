@@ -1,6 +1,6 @@
 // ドキュメント・アイテムの生成と小さなユーティリティ
 
-import type { Adjust, CropShape, DocState, ImageItem, Item, Rect } from './types';
+import type { Adjust, CropShape, DocState, ImageItem, Item, MediaItem, MediaItemBase, Rect, VideoItem } from './types';
 
 export const DEFAULT_ADJUST: Readonly<Adjust> = {
   brightness: 100,
@@ -65,8 +65,8 @@ export function normalizeDoc(doc: DocState): DocState {
   if (!cs || !['rect', 'roundRect', 'ellipse'].includes(cs.kind)) doc.canvas.shape = { ...DEFAULT_CROP_SHAPE };
   else if (typeof cs.radius !== 'number') cs.radius = DEFAULT_CROP_SHAPE.radius;
   for (const it of doc.items) {
-    if (it.type !== 'image') continue;
-    const shape = (it as Partial<ImageItem>).cropShape;
+    if (it.type !== 'image' && it.type !== 'video') continue;
+    const shape = (it as Partial<MediaItemBase>).cropShape;
     if (!shape || !['rect', 'roundRect', 'ellipse'].includes(shape.kind)) it.cropShape = { ...DEFAULT_CROP_SHAPE };
     else if (typeof shape.radius !== 'number') shape.radius = DEFAULT_CROP_SHAPE.radius;
   }
@@ -81,11 +81,58 @@ export function findItem(doc: DocState, id: string): Item | undefined {
   return doc.items.find((it) => it.id === id);
 }
 
+export interface VideoSource {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  duration: number;
+}
+
+/** 動画クリップを作る（元動画全体を使い、指定の中心・拡大率で置く） */
+export function createVideoItem(src: VideoSource, cx: number, cy: number, scale = 1): VideoItem {
+  return {
+    id: newId('vid'),
+    type: 'video',
+    name: src.name,
+    visible: true,
+    locked: false,
+    cx,
+    cy,
+    rotation: 0,
+    flipX: false,
+    flipY: false,
+    mediaId: src.id,
+    srcWidth: src.width,
+    srcHeight: src.height,
+    crop: { x: 0, y: 0, w: src.width, h: src.height },
+    userCrop: null,
+    cropShape: { ...DEFAULT_CROP_SHAPE },
+    scaleX: scale,
+    scaleY: scale,
+    adjust: { ...DEFAULT_ADJUST },
+    inPoint: 0,
+    outPoint: src.duration,
+    speed: 1,
+    volume: 1,
+    muted: false,
+  };
+}
+
 /** 画像の「ユーザー指定の範囲」（なければ元画像全体） */
-export function baseCrop(it: ImageItem): Rect {
+export function baseCrop(it: MediaItem): Rect {
   return it.userCrop ? { ...it.userCrop } : { x: 0, y: 0, w: it.srcWidth, h: it.srcHeight };
 }
 
 export function isImage(it: Item): it is ImageItem {
   return it.type === 'image';
+}
+
+export function isVideo(it: Item): it is VideoItem {
+  return it.type === 'video';
+}
+
+/** 画像・動画（変形・色調補正の対象） */
+export function isMedia(it: Item): it is MediaItem {
+  return it.type === 'image' || it.type === 'video';
 }

@@ -3,7 +3,7 @@
 // registerTool で登録するだけで、左パネルのボタンと設定欄が増える。
 
 import type { Editor } from '../core/Editor';
-import type { DocState, Point } from '../core/types';
+import type { DocState, Item, Point } from '../core/types';
 import type { CanvasArea } from '../render/ViewRenderer';
 import type { View } from '../render/view';
 
@@ -22,6 +22,8 @@ export interface ToolHost {
   toast(message: string): void;
   /** ツールが一時的にカーソルを変えたいとき（null で既定に戻す） */
   setCursor(cursor: string | null): void;
+  /** 今の時刻に画面に出ているか（動画モードで、再生位置にない動画クリップは false） */
+  isShown(it: Item): boolean;
 }
 
 /** ツールを開くときの指定（ツールごとに意味が決まる） */
