@@ -1,25 +1,31 @@
-// 動画の書き出しダイアログ：MP4（H.264 + AAC）、倍率（WQHD×1.5 = 4K）、30 / 60fps、画質。
+// 動画の書き出しダイアログ：MP4（H.264 + AAC）、倍率（WQHD×1.5 = 4K）、30 / 60fps、画質（ビットレート）。
 // 書き出す前に、この環境でエンコードできるかを確かめる。AAC が使えないときは理由を示し「音声なしで書き出す」を選べる。
+// 画質は「元の動画に合わせる」（既定）/ 高画質 / 標準 / 小さいファイル / ビットレートを指定。予想ファイルサイズも表示する。
 
 import type { AssetStore } from '../core/AssetStore';
 import { audioSegments, formatTime, totalDuration } from '../core/timeline';
 import type { DocState } from '../core/types';
-import { QUALITY_LABEL, checkVideoSupport, chooseVideoTarget, exportVideo, videoExportSize, type VideoExportOptions, type VideoQuality } from '../media/browserExport';
+import { checkVideoSupport, chooseVideoTarget, exportBitrate, exportColorSpace, exportVideo, sourceMaxBitrate, videoExportSize, type VideoExportOptions } from '../media/browserExport';
+import { describeCodec } from '../media/codecName';
+import { AUDIO_BITRATE, QUALITY_MODE_LABEL, describeColorSpace, estimateFileSize, formatBytes, formatMbps, scaledMainClips, type QualityMode } from '../media/encodeSettings';
 import { ExportCanceledError } from '../media/exportPipeline';
 import type { MediaStore } from '../media/MediaStore';
-import { button, checkbox, group, h, hint, segmented, text } from './controls';
+import { button, checkbox, group, h, hint, numberInput, segmented, selectInput, text } from './controls';
 import { openDialog } from './Dialog';
 
 const STORAGE_KEY = 'image-editor.videoExport';
 
-function loadPrefs(): Omit<VideoExportOptions, 'includeAudio' | 'range'> {
-  const def = { scale: 1, fps: 30 as const, quality: 'high' as VideoQuality };
+type Prefs = Pick<VideoExportOptions, 'scale' | 'fps' | 'mode' | 'customMbps'>;
+
+function loadPrefs(): Prefs {
+  const def: Prefs = { scale: 1, fps: 30, mode: 'source', customMbps: 20 };
   try {
-    const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<VideoExportOptions> | null;
+    const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<Prefs> | null;
     return {
       scale: [1, 1.5, 2].includes(p?.scale ?? 0) ? p!.scale! : def.scale,
       fps: p?.fps === 60 ? 60 : 30,
-      quality: p?.quality && p.quality in QUALITY_LABEL ? p.quality : def.quality,
+      mode: p?.mode && p.mode in QUALITY_MODE_LABEL ? p.mode : def.mode,
+      customMbps: typeof p?.customMbps === 'number' && p.customMbps > 0 ? p.customMbps : def.customMbps,
     };
   } catch {
     return def;
@@ -45,6 +51,7 @@ export function openVideoExportDialog(
   const prefs = loadPrefs();
   let aacOk = true;
   let videoOk = true;
+  let hardware = false;
   let checkSeq = 0;
 
   const scaleSeg = segmented<string>(
@@ -72,15 +79,30 @@ export function openVideoExportDialog(
       void recheck();
     },
   );
-  const qualitySeg = segmented<VideoQuality>(
-    (Object.keys(QUALITY_LABEL) as VideoQuality[]).map((q) => ({ value: q, label: QUALITY_LABEL[q] })),
-    prefs.quality,
+  const qualitySel = selectInput<QualityMode>(
+    (Object.keys(QUALITY_MODE_LABEL) as QualityMode[]).map((q) => ({ value: q, label: QUALITY_MODE_LABEL[q] })),
+    prefs.mode,
     (v) => {
-      prefs.quality = v;
-      qualitySeg.set(v);
+      prefs.mode = v;
       void recheck();
     },
   );
+  const mbpsInput = numberInput({
+    value: prefs.customMbps,
+    min: 1,
+    max: 500,
+    step: 1,
+    digits: 1,
+    unit: 'Mbps',
+    onChange: (v) => {
+      prefs.customMbps = v;
+      void recheck();
+    },
+  });
+  const bitrateText = text('', 'value');
+  const bitrateNote = text('', 'hint pre-line');
+  const scaleWarn = text('', 'hint');
+  const colorNote = text('', 'hint');
   const rangeSeg = segmented<string>(
     [
       { value: 'all', label: 'タイムライン全体' },
@@ -112,10 +134,11 @@ export function openVideoExportDialog(
     group('形式', h('div', { class: 'value' }, 'MP4（映像 H.264 / 音声 AAC）'), support.el),
     group('書き出す範囲', rangeSeg.el, rangeNote.el),
     group('倍率（キャンバスに対して）', scaleSeg.el),
-    group('書き出しサイズ', sizeText.el, sizeNote.el),
+    group('書き出しサイズ', sizeText.el, sizeNote.el, scaleWarn.el),
     group('フレームレート', fpsSeg.el),
-    group('画質', qualitySeg.el),
+    group('画質', h('div', { class: 'row-inline' }, qualitySel.el, mbpsInput.el), bitrateText.el, bitrateNote.el),
     group('音声', noAudioCb.el),
+    group('色空間', colorNote.el),
     progressWrap,
     hint('選んだファイルに少しずつ書き込みます。動画はこのパソコンの中だけで処理され、外部には送信されません。'),
   );
@@ -130,10 +153,34 @@ export function openVideoExportDialog(
     sizeText.set(`${width} × ${height} px${name ? `（${name}）` : ''}`);
     sizeNote.set(`長さ ${formatTime(durationNow())}・${prefs.fps}fps・約 ${Math.max(1, Math.round(durationNow() * prefs.fps))} フレーム${adjusted ? '（H.264 の制約で幅・高さを偶数に切り下げ）' : ''}`);
     const lines: string[] = [];
-    if (!videoOk) lines.push('⚠ この環境ではこのサイズ・設定の H.264 をエンコードできません。倍率・フレームレート・画質を下げてください');
+    if (!videoOk) lines.push('⚠ この環境ではこのサイズ・設定の H.264 をエンコードできません。倍率・フレームレート・ビットレートを下げてください');
     if (!aacOk && hasAudio) lines.push('⚠ この環境（ブラウザ／OS）では音声を AAC でエンコードできません。「音声なしで書き出す」を選ぶと書き出せます');
     if (!hasAudio) lines.push('音声の入ったクリップがないため、音声なしで書き出します');
-    support.set(lines.join('\n') || '✓ この環境で書き出せます');
+    support.set(lines.join('\n') || `✓ この環境で書き出せます（${hardware ? 'ハードウェアエンコーダーを優先' : 'ハードウェアエンコーダーが使えないため、ブラウザに任せます'}）`);
+    // 画質（ビットレートと予想ファイルサイズ）
+    mbpsInput.el.hidden = prefs.mode !== 'custom';
+    const choice = exportBitrate(doc, media, prefs);
+    const withAudioNow = hasAudio && !noAudioCb.input.checked;
+    const bytes = estimateFileSize(choice.bitrate, withAudioNow ? AUDIO_BITRATE : 0, durationNow());
+    bitrateText.set(`映像 ${formatMbps(choice.bitrate)}${withAudioNow ? `＋音声 ${AUDIO_BITRATE / 1000} kbps` : ''}・予想ファイルサイズ 約 ${formatBytes(bytes)}`);
+    const src = sourceMaxBitrate(doc, media);
+    const notes: string[] = [];
+    if (prefs.mode === 'source') {
+      notes.push(choice.fellBack ? '元の動画のビットレートが分からないため（メインに動画がないなど）、「標準」の値にしています' : `メインの元動画のうち最も高いビットレート（${formatMbps(src ?? 0)}）に合わせます`);
+    } else if (src) {
+      notes.push(`参考：メインの元動画の最高 ${formatMbps(src)}`);
+    }
+    notes.push('H.264 High プロファイル・可変ビットレート・画質優先。実際のサイズは映像の内容で前後します');
+    bitrateNote.set(notes.join('\n'));
+    // 拡大・縮小されるクリップ
+    const scaled = scaledMainClips(doc, prefs.scale);
+    scaleWarn.set(
+      scaled.length
+        ? `⚠ 拡大・縮小されます：${scaled.map((c) => `${c.srcW}×${c.srcH} → ${c.outW}×${c.outH}（${c.outW * c.outH > c.srcW * c.srcH ? '拡大' : '縮小'}）`).join('、')}。元の画質のまま書き出すには、キャンバスと倍率を元の動画と同じサイズにしてください`
+        : '',
+    );
+    scaleWarn.el.classList.toggle('warn', scaled.length > 0);
+    colorNote.set(`${describeColorSpace(exportColorSpace(doc, media))}（メインの最初の動画に合わせます）`);
     support.el.classList.toggle('warn', !videoOk || (!aacOk && hasAudio));
     noAudioCb.input.disabled = !hasAudio || running;
     const withAudio = hasAudio && !noAudioCb.input.checked;
@@ -144,10 +191,11 @@ export function openVideoExportDialog(
     const seq = ++checkSeq;
     support.set('確認中…');
     exportBtn.disabled = true;
-    const r = await checkVideoSupport(doc, { ...prefs, includeAudio: true, range: null });
+    const r = await checkVideoSupport(doc, media, prefs);
     if (seq !== checkSeq) return;
     videoOk = r.video;
     aacOk = r.audio;
+    hardware = r.hardware;
     if (!aacOk && hasAudio) noAudioCb.set(true);
     update();
   }
@@ -166,18 +214,20 @@ export function openVideoExportDialog(
     controller = new AbortController();
     progressWrap.hidden = false;
     cancelBtn.textContent = 'キャンセル';
-    for (const s of [scaleSeg, fpsSeg, qualitySeg, rangeSeg]) s.el.classList.add('disabled');
+    for (const s of [scaleSeg, fpsSeg, rangeSeg]) s.el.classList.add('disabled');
+    qualitySel.el.disabled = true;
+    mbpsInput.input.disabled = true;
     update();
     const startedAt = performance.now();
     try {
-      await exportVideo(doc, assets, media, { ...prefs, includeAudio: hasAudio && !noAudioCb.input.checked, range: useRange && ioRange ? ioRange : null }, dest.target, (r) => {
+      const used = await exportVideo(doc, assets, media, { ...prefs, includeAudio: hasAudio && !noAudioCb.input.checked, range: useRange && ioRange ? ioRange : null, preferHardware: hardware }, dest.target, (r) => {
         progress.value = r;
         const elapsed = (performance.now() - startedAt) / 1000;
         const remain = r > 0.01 ? (elapsed / r) * (1 - r) : 0;
         progressText.set(`${Math.floor(r * 100)}%　経過 ${formatTime(elapsed, false)}${r > 0.01 ? `　残り約 ${formatTime(remain, false)}` : ''}`);
       }, controller.signal);
       await dest.finish();
-      toast(`動画を書き出しました（${formatTime((performance.now() - startedAt) / 1000, false)}）`);
+      toast(`動画を書き出しました（${formatTime((performance.now() - startedAt) / 1000, false)}・${describeCodec(used.codec)}・${formatMbps(used.bitrate)}）`);
       running = false;
       dlg.close();
     } catch (e) {
@@ -191,7 +241,9 @@ export function openVideoExportDialog(
       running = false;
       progressWrap.hidden = true;
       cancelBtn.textContent = '閉じる';
-      for (const s of [scaleSeg, fpsSeg, qualitySeg, rangeSeg]) s.el.classList.remove('disabled');
+      for (const s of [scaleSeg, fpsSeg, rangeSeg]) s.el.classList.remove('disabled');
+      qualitySel.el.disabled = false;
+      mbpsInput.input.disabled = false;
       update();
     }
   }

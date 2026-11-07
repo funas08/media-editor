@@ -2,7 +2,7 @@
 // フレームと音声は呼び出し側が作って渡す（ブラウザでは Canvas と Web Audio、テストでは仮のデータ）。
 // Mediabunny の Output に映像・音声を交互に少しずつ渡し、MP4 にまとめる。
 
-import { AudioSampleSource, Mp4OutputFormat, Output, VideoSampleSource, type AudioSample, type Quality, type Target, type VideoCodec, type VideoSample } from 'mediabunny';
+import { AudioSampleSource, Mp4OutputFormat, Output, Quality, VideoSampleSource, type AudioSample, type Target, type VideoCodec, type VideoSample } from 'mediabunny';
 
 export interface ExportPlan {
   width: number;
@@ -11,9 +11,21 @@ export interface ExportPlan {
   /** 長さ（秒） */
   duration: number;
   videoCodec: VideoCodec;
-  videoBitrate: number | Quality;
+  /** 映像のビットレート（bps、可変ビットレートの目標値） */
+  videoBitrate: number;
+  /** ハードウェアエンコーダーを優先するか（使えない環境では 'no-preference' を渡す） */
+  hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
+  /** キーフレームの間隔（秒） */
+  keyFrameInterval?: number;
   /** 音声なしで書き出すときは null */
-  audio: { bitrate: number | Quality; sampleRate: number; channels: number } | null;
+  audio: { bitrate: number; sampleRate: number; channels: number } | null;
+  /**
+   * 書き出す動画の色空間。MP4 の色情報（colr）は、エンコーダーが返す情報から書かれるため、
+   * エンコーダーが返さなかったとき（または一部が欠けているとき）にこの値で補う
+   */
+  colorSpace?: VideoColorSpaceInit;
+  /** エンコーダーの設定が決まったときに呼ばれる（確認・表示用） */
+  onEncoderConfig?: (config: VideoEncoderConfig) => void;
 }
 
 export interface ExportCallbacks {
@@ -43,9 +55,27 @@ export class ExportCanceledError extends Error {
 /** 書き出しを実行する。target には BufferTarget（テスト）や StreamTarget（ファイル）を渡す */
 export async function runExport(plan: ExportPlan, target: Target, cb: ExportCallbacks): Promise<void> {
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: false }), target });
-  const video = new VideoSampleSource({ codec: plan.videoCodec, bitrate: plan.videoBitrate, keyFrameInterval: 2, sizeChangeBehavior: 'deny' });
+  // 画質優先：ビットレートを明示した可変ビットレート（指定しないと Mediabunny は量子化値固定になり、ファイルサイズを決められない）、
+  // latencyMode は 'quality'（フレームを落とさず、画質を優先）
+  const video = new VideoSampleSource({
+    codec: plan.videoCodec,
+    quality: new Quality({ bitrate: plan.videoBitrate, bitrateMode: 'variable' }),
+    latencyMode: 'quality',
+    hardwareAcceleration: plan.hardwareAcceleration ?? 'no-preference',
+    keyFrameInterval: plan.keyFrameInterval ?? 2,
+    sizeChangeBehavior: 'deny',
+    onEncoderConfig: plan.onEncoderConfig,
+    onEncodedPacket: (_packet, meta) => {
+      // ここで渡される meta がそのまま MP4 に書かれる
+      const dc = meta?.decoderConfig;
+      if (!dc || !plan.colorSpace) return;
+      const cs = dc.colorSpace;
+      if (cs?.primaries && cs.transfer && cs.matrix && cs.fullRange != null) return;
+      dc.colorSpace = { ...plan.colorSpace, ...Object.fromEntries(Object.entries(cs ?? {}).filter(([, v]) => v != null)) };
+    },
+  });
   output.addVideoTrack(video, { frameRate: plan.fps });
-  const audio = plan.audio && cb.renderAudio ? new AudioSampleSource({ codec: 'aac', bitrate: plan.audio.bitrate }) : null;
+  const audio = plan.audio && cb.renderAudio ? new AudioSampleSource({ codec: 'aac', quality: new Quality({ bitrate: plan.audio.bitrate }) }) : null;
   if (audio) output.addAudioTrack(audio);
   await output.start();
 

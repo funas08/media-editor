@@ -1198,3 +1198,17 @@ kbd {
   padding: 0 4px;
   margin: 0;
 }
+
+/* 書き出しダイアログ：画質の選択とビットレートの入力を横に並べる */
+.row-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row-inline [hidden] {
+  display: none;
+}
+.pre-line {
+  white-space: pre-line;
+}

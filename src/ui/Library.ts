@@ -5,11 +5,31 @@ import type { AssetStore } from '../core/AssetStore';
 import { Emitter } from '../core/emitter';
 import type { SourceInfo } from '../features/clips';
 import { isImageFile } from '../io/files';
-import { MediaLoadError, isAudioFile, isVideoFile, type MediaStore } from '../media/MediaStore';
+import { describeColorSpace, formatMbps } from '../media/encodeSettings';
+import { MediaLoadError, isAudioFile, isVideoFile, type MediaInfo, type MediaStore } from '../media/MediaStore';
+import { describeCodec } from '../media/codecName';
 
 export interface LibraryEntry extends SourceInfo {
   /** サムネイル（data URL）。音楽は null */
   thumb: string | null;
+  /** 一覧に出す元のビットレート（例：24 Mbps）。動画以外は空 */
+  bitrateText?: string;
+  /** ツールチップに出す詳しい情報（フレームレート・コーデック・色空間） */
+  details?: string;
+}
+
+/** 動画・音楽の情報から素材の項目を作る */
+function mediaEntry(i: MediaInfo, thumb: string | null): LibraryEntry {
+  const base: LibraryEntry = { kind: i.kind, id: i.id, name: i.name, width: i.width, height: i.height, duration: i.duration, thumb };
+  if (i.kind !== 'video') return base;
+  const bitrateText = i.videoBitrate ? `${i.bitrateEstimated ? '約 ' : ''}${formatMbps(i.videoBitrate)}` : '';
+  const details = [
+    `${i.fps.toFixed(2).replace(/\.?0+$/, '')}fps`,
+    `映像：${describeCodec(i.codecString ?? i.videoCodec)}`,
+    i.videoBitrate ? `ビットレート：${i.bitrateEstimated ? '約 ' : ''}${(i.videoBitrate / 1e6).toFixed(1)} Mbps${i.bitrateEstimated ? '（ファイルサイズからの見積もり）' : ''}` : 'ビットレート：不明',
+    `色空間：${describeColorSpace(i.colorSpace)}`,
+  ].join('\n');
+  return { ...base, bitrateText, details };
 }
 
 export class Library {
@@ -38,8 +58,7 @@ export class Library {
       try {
         if (isVideoFile(f) || isAudioFile(f)) {
           const m = await this.media.add(f);
-          const i = m.info;
-          added.push(this.register({ kind: i.kind, id: i.id, name: i.name, width: i.width, height: i.height, duration: i.duration, thumb: await this.media.thumbnail(i.id).catch(() => null) }));
+          added.push(this.register(mediaEntry(m.info, await this.media.thumbnail(m.info.id).catch(() => null))));
         } else if (isImageFile(f)) {
           const a = await this.assets.add(f, f.name || '画像');
           added.push(this.register({ kind: 'image', id: a.id, name: a.name, width: a.width, height: a.height, duration: 0, thumb: imageThumb(a.bitmap) }));
@@ -73,8 +92,7 @@ export class Library {
   async registerMedia(id: string): Promise<void> {
     const m = this.media.get(id);
     if (!m || this.get(id)) return;
-    const i = m.info;
-    this.register({ kind: i.kind, id: i.id, name: i.name, width: i.width, height: i.height, duration: i.duration, thumb: await this.media.thumbnail(i.id).catch(() => null) });
+    this.register(mediaEntry(m.info, await this.media.thumbnail(id).catch(() => null)));
   }
 
   remove(id: string): void {

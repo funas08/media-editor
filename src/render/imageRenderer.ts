@@ -51,13 +51,43 @@ export function drawMediaItem(ctx: Ctx2D, it: MediaItem, env: DrawEnv, source: C
     const kx = sourceW / it.srcWidth;
     const ky = sourceH / it.srcHeight;
     const c = it.crop;
-    ctx.drawImage(source, c.x * kx, c.y * ky, c.w * kx, c.h * ky, -w / 2, -h / 2, w, h);
+    const sx = c.x * kx;
+    const sy = c.y * ky;
+    const sw = c.w * kx;
+    const sh = c.h * ky;
+    if (!drawPixelExact(ctx, source, sx, sy, sw, sh, w, h)) ctx.drawImage(source, sx, sy, sw, sh, -w / 2, -h / 2, w, h);
   } else {
     // 動画のフレームがまだ用意できていないときは黒で埋める
     ctx.fillStyle = '#000';
     ctx.fillRect(-w / 2, -h / 2, w, h);
   }
   ctx.restore();
+}
+
+/** 整数とみなせるか（座標計算の誤差を許す） */
+function isWhole(v: number): boolean {
+  return Math.abs(v - Math.round(v)) < 1e-3;
+}
+
+/**
+ * 元の 1 ピクセルが描画先の 1 ピクセルにちょうど重なる（回転・反転・拡大縮小なし、位置が整数）ときは、
+ * 補間を通さずにそのままの画素で描く（書き出しで元動画と同じサイズのクリップが、ぼやけないようにする）。
+ * 描いたら true。条件に合わなければ何もせず false（呼び出し側が通常どおり imageSmoothingQuality 'high' で描く）
+ */
+function drawPixelExact(ctx: Ctx2D, source: CanvasImageSource, sx: number, sy: number, sw: number, sh: number, w: number, h: number): boolean {
+  const m = ctx.getTransform();
+  if (Math.abs(m.b) > 1e-9 || Math.abs(m.c) > 1e-9) return false;
+  if (Math.abs(m.a * w - sw) > 1e-3 || Math.abs(m.d * h - sh) > 1e-3) return false;
+  if (![sx, sy, sw, sh].every(isWhole)) return false;
+  const dx = m.e - (m.a * w) / 2;
+  const dy = m.f - (m.d * h) / 2;
+  if (!isWhole(dx) || !isWhole(dy)) return false;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, Math.round(sx), Math.round(sy), Math.round(sw), Math.round(sh), Math.round(dx), Math.round(dy), Math.round(sw), Math.round(sh));
+  ctx.restore();
+  return true;
 }
 
 registerItemRenderer('image', {

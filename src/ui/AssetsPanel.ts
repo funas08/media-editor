@@ -66,12 +66,12 @@ export class AssetsPanel {
 
   private row(e: LibraryEntry): HTMLElement {
     const kindLabel = { image: '画像', video: '動画', audio: '音楽' }[e.kind];
-    const meta = [kindLabel, e.width > 0 ? `${e.width}×${e.height}` : '', e.duration > 0 ? formatTime(e.duration) : ''].filter(Boolean).join('・');
+    const meta = [kindLabel, e.width > 0 ? `${e.width}×${e.height}` : '', e.duration > 0 ? formatTime(e.duration) : '', e.bitrateText ?? ''].filter(Boolean).join('・');
     const thumb = e.thumb ? h('img', { class: 'asset-thumb', src: e.thumb, alt: '' }) : h('span', { class: 'asset-thumb asset-thumb-icon', html: e.kind === 'audio' ? icons.music : icons.film });
     const del = iconButton(icons.trash, '素材を削除', () => this.host.removeSource(e));
     const li = h(
       'li',
-      { class: 'asset', draggable: true, title: `${e.name}\nドラッグしてタイムライン・キャンバスに置く／ダブルクリックで追加` },
+      { class: 'asset', draggable: true, title: `${e.name}${e.details ? `\n${e.details}` : ''}\nドラッグしてタイムライン・キャンバスに置く／ダブルクリックで追加` },
       thumb,
       h('div', { class: 'asset-text' }, h('span', { class: 'asset-name' }, e.name), h('span', { class: 'asset-meta' }, meta)),
       del,

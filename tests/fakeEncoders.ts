@@ -1,6 +1,7 @@
 // テスト用の仮エンコーダー（Node には WebCodecs がないため）。
 // 中身のないパケットを出すだけだが、MP4 の構造（長さ・解像度・トラック数）は本物と同じように作られる。
 // 映像は VP9 として登録する（H.264 は SPS/PPS の実データが必要なため。本番は H.264）。
+// 仮エンコーダーは色空間を返さない（返さないブラウザでも MP4 に色情報が入ることを確かめるため）。
 
 import { CustomAudioEncoder, CustomVideoEncoder, EncodedPacket, registerEncoder, type AudioSample, type VideoSample } from 'mediabunny';
 

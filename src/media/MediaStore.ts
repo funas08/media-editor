@@ -2,7 +2,8 @@
 // Mediabunny の Input を使って中身（長さ・解像度・音声の有無など）を調べ、デコード用のトラックを持つ。
 // 画像の AssetStore と同じく、Undo で戻せるようセッション中は原則として削除しない。
 
-import { ALL_FORMATS, BlobSource, CanvasSink, Input, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
+import { ALL_FORMATS, BlobSource, CanvasSink, Input, MP4, QTFF, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
+import type { SourceColorSpace } from './encodeSettings';
 import { newId } from '../core/doc';
 
 export interface MediaInfo {
@@ -23,6 +24,14 @@ export interface MediaInfo {
   hasAudio: boolean;
   videoCodec: string | null;
   audioCodec: string | null;
+  /** 映像のビットレート（bps）。分からなければ null */
+  videoBitrate: number | null;
+  /** videoBitrate がファイルサイズからの見積もりなら true（MP4 / MOV 以外） */
+  bitrateEstimated: boolean;
+  /** 映像のコーデック文字列（例：avc1.640033。プロファイルとレベルが分かる） */
+  codecString: string | null;
+  /** 映像の色空間 */
+  colorSpace: SourceColorSpace | null;
 }
 
 export interface MediaEntry {
@@ -46,6 +55,25 @@ export function isAudioFile(f: File): boolean {
   return f.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(f.name);
 }
 
+/**
+ * 映像のビットレート。MP4 / MOV はファイルの索引から全体の平均を正確に求める（中身は読まないので速い）。
+ * それ以外はファイルサイズと長さから見積もる（音声ぶんとして 192kbps を引く）
+ */
+async function videoBitrate(input: Input, video: InputVideoTrack, size: number, duration: number, hasAudio: boolean): Promise<{ bitrate: number; estimated: boolean } | null> {
+  try {
+    const format = await input.getFormat();
+    if (format === MP4 || format === QTFF) {
+      const s = await video.computePacketStats();
+      if (s.averageBitrate > 0) return { bitrate: s.averageBitrate, estimated: false };
+    }
+  } catch {
+    // 見積もりに切り替える
+  }
+  if (!(duration > 0)) return null;
+  const total = (size * 8) / duration - (hasAudio ? 192_000 : 0);
+  return total > 0 ? { bitrate: total, estimated: true } : null;
+}
+
 export class MediaStore {
   private entries = new Map<string, MediaEntry>();
 
@@ -66,6 +94,7 @@ export class MediaStore {
       const duration = await input.computeDuration();
       if (!(duration > 0)) throw new MediaLoadError('長さを読み取れませんでした');
       const stats = video ? await video.computePacketStats(120) : null;
+      const vb = video ? await videoBitrate(input, video, file.size, duration, audio !== null) : null;
       const info: MediaInfo = {
         id,
         kind: video ? 'video' : 'audio',
@@ -79,6 +108,10 @@ export class MediaStore {
         hasAudio: audio !== null,
         videoCodec: video?.codec ?? null,
         audioCodec: audio?.codec ?? null,
+        videoBitrate: vb?.bitrate ?? null,
+        bitrateEstimated: vb?.estimated ?? false,
+        codecString: video ? await video.getCodecParameterString().catch(() => null) : null,
+        colorSpace: video ? await video.getColorSpace().catch(() => null) : null,
       };
       const entry: MediaEntry = { info, file, input, video, audio };
       this.entries.set(id, entry);

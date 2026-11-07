@@ -1,20 +1,7 @@
 // 動画書き出しのブラウザ側の処理：原寸の OffscreenCanvas にフレームを描き、Web Audio で音声をミックスする。
 // 書き出し先は File System Access API で選んだファイルに少しずつ書き込む（選べない場合はダウンロード）。
 
-import {
-  AudioSample,
-  BufferTarget,
-  CanvasSink,
-  QUALITY_HIGH,
-  QUALITY_MEDIUM,
-  QUALITY_VERY_HIGH,
-  StreamTarget,
-  VideoSample,
-  canEncodeAudio,
-  canEncodeVideo,
-  type Quality,
-  type Target,
-} from 'mediabunny';
+import { AudioSample, BufferTarget, CanvasSink, Quality, StreamTarget, VideoSample, canEncodeAudio, canEncodeVideo, type Target } from 'mediabunny';
 import type { AssetStore } from '../core/AssetStore';
 import { audioSegments, clipTimesAt, totalDuration } from '../core/timeline';
 import type { DocState, VideoItem } from '../core/types';
@@ -24,23 +11,57 @@ import { scheduleSegments } from './audioSchedule';
 import { runExport, type ExportPlan } from './exportPipeline';
 import type { MediaStore } from './MediaStore';
 import { SequentialFrames } from './SequentialFrames';
-
-export type VideoQuality = 'medium' | 'high' | 'very_high';
+import { AUDIO_BITRATE, DEFAULT_COLOR_SPACE, mainVideoMediaIds, outputColorSpace, resolveBitrate, rgbaToI420, type BitrateChoice, type OutputColorSpace, type QualityMode } from './encodeSettings';
 
 export interface VideoExportOptions {
   /** キャンバスに対する倍率（1 / 1.5 / 2） */
   scale: number;
   fps: 30 | 60;
-  quality: VideoQuality;
+  /** 画質の選び方 */
+  mode: QualityMode;
+  /** mode が 'custom' のときのビットレート（Mbps） */
+  customMbps: number;
   includeAudio: boolean;
   /** 書き出す範囲（秒）。null ならタイムライン全体 */
   range: { from: number; to: number } | null;
+  /** ハードウェアエンコーダーを優先する（checkVideoSupport で使えると分かったとき true） */
+  preferHardware: boolean;
 }
 
-export const QUALITY_LABEL: Record<VideoQuality, string> = { medium: '標準', high: '高', very_high: '最高' };
-const QUALITY_VALUE: Record<VideoQuality, Quality> = { medium: QUALITY_MEDIUM, high: QUALITY_HIGH, very_high: QUALITY_VERY_HIGH };
+/** 書き出しで実際に使ったエンコーダーの設定（完了時の表示用） */
+export interface EncoderUsed {
+  codec: string;
+  bitrate: number;
+  hardwareAcceleration: string;
+  colorSpace: OutputColorSpace;
+}
+
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
+
+/** メインの動画クリップの元動画のうち、最も高い映像ビットレート（bps）。分からなければ null */
+export function sourceMaxBitrate(doc: DocState, media: MediaStore): number | null {
+  let max = 0;
+  for (const id of mainVideoMediaIds(doc)) max = Math.max(max, media.get(id)?.info.videoBitrate ?? 0);
+  return max > 0 ? max : null;
+}
+
+/** 選んだ画質での映像ビットレート */
+export function exportBitrate(doc: DocState, media: MediaStore, o: Pick<VideoExportOptions, 'scale' | 'fps' | 'mode' | 'customMbps'>): BitrateChoice {
+  const { width, height } = videoExportSize(doc, o.scale);
+  return resolveBitrate(o.mode, { width, height, fps: o.fps }, sourceMaxBitrate(doc, media), o.customMbps);
+}
+
+/** 書き出す動画の色空間：メインの最初の動画（なければ最初の動画）の色空間を引き継ぐ */
+export function exportColorSpace(doc: DocState, media: MediaStore): OutputColorSpace {
+  const ids = mainVideoMediaIds(doc);
+  if (ids.length === 0) for (const it of doc.items) if (it.type === 'video') ids.push(it.mediaId);
+  for (const id of ids) {
+    const info = media.get(id)?.info;
+    if (info) return outputColorSpace(info.colorSpace);
+  }
+  return { ...DEFAULT_COLOR_SPACE };
+}
 
 /** 書き出しサイズ（H.264 は幅・高さが偶数である必要があるので切り下げる） */
 export function videoExportSize(doc: DocState, scale: number): { width: number; height: number; adjusted: boolean } {
@@ -51,14 +72,21 @@ export function videoExportSize(doc: DocState, scale: number): { width: number; 
   return { width, height, adjusted: width !== w || height !== h };
 }
 
-/** この環境で書き出せるか（映像：H.264、音声：AAC） */
-export async function checkVideoSupport(doc: DocState, o: VideoExportOptions): Promise<{ video: boolean; audio: boolean }> {
+/**
+ * この環境で書き出せるか（映像：H.264、音声：AAC）。映像はまずハードウェアエンコーダーで確かめ、
+ * 使えなければ指定なし（ブラウザに任せる）で確かめる
+ */
+export async function checkVideoSupport(doc: DocState, media: MediaStore, o: Pick<VideoExportOptions, 'scale' | 'fps' | 'mode' | 'customMbps'>): Promise<{ video: boolean; audio: boolean; hardware: boolean }> {
   const { width, height } = videoExportSize(doc, o.scale);
-  const [video, audio] = await Promise.all([
-    canEncodeVideo('avc', { width, height, bitrate: QUALITY_VALUE[o.quality] }).catch(() => false),
-    canEncodeAudio('aac', { numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, bitrate: QUALITY_VALUE[o.quality] }).catch(() => false),
+  const quality = new Quality({ bitrate: exportBitrate(doc, media, o).bitrate, bitrateMode: 'variable' });
+  const tryVideo = (hw: 'prefer-hardware' | 'no-preference') =>
+    canEncodeVideo('avc', { width, height, quality, frameRate: o.fps, latencyMode: 'quality', hardwareAcceleration: hw }).catch(() => false);
+  const [hardware, audio] = await Promise.all([
+    tryVideo('prefer-hardware'),
+    canEncodeAudio('aac', { numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, quality: new Quality({ bitrate: AUDIO_BITRATE }) }).catch(() => false),
   ]);
-  return { video, audio };
+  const video = hardware || (await tryVideo('no-preference'));
+  return { video, audio, hardware };
 }
 
 /** 書き出し先を選ぶ。キャンセルなら null。選べないブラウザではメモリに書いて最後にダウンロード */
@@ -157,8 +185,11 @@ export async function exportVideo(
   target: Target,
   onProgress: (ratio: number) => void,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<EncoderUsed> {
   const { width, height } = videoExportSize(doc, o.scale);
+  const bitrate = exportBitrate(doc, media, o).bitrate;
+  const colorSpace = exportColorSpace(doc, media);
+  const used: EncoderUsed = { codec: 'avc', bitrate, hardwareAcceleration: o.preferHardware ? 'prefer-hardware' : 'no-preference', colorSpace };
   // 範囲（I〜O）を書き出すときは、その開始を 0 秒として書き出す
   const from = o.range ? o.range.from : 0;
   const to = o.range ? o.range.to : totalDuration(doc);
@@ -168,12 +199,20 @@ export async function exportVideo(
     fps: o.fps,
     duration: Math.max(0, to - from),
     videoCodec: 'avc',
-    videoBitrate: QUALITY_VALUE[o.quality],
-    audio: o.includeAudio ? { bitrate: QUALITY_VALUE[o.quality], sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
+    videoBitrate: bitrate,
+    hardwareAcceleration: used.hardwareAcceleration as ExportPlan['hardwareAcceleration'],
+    audio: o.includeAudio ? { bitrate: AUDIO_BITRATE, sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
+    colorSpace,
+    onEncoderConfig: (c) => {
+      used.codec = c.codec;
+      console.info('動画のエンコーダー設定', c);
+    },
   };
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('書き出し用の Canvas を作成できませんでした');
+  // I420 の作業用（フレームごとに使い回す。VideoSample が中身を複製する）
+  let yuv: Uint8Array | undefined;
   const frames = new ExportFrames(media);
   try {
     await runExport(plan, target, {
@@ -188,11 +227,16 @@ export async function exportVideo(
         ctx.fillRect(0, 0, width, height);
         ctx.setTransform(width / doc.canvas.width, 0, 0, height / doc.canvas.height, 0, 0);
         drawScene(ctx, doc, { assets, pixelScale: width / doc.canvas.width, time: t, frames });
-        return new VideoSample(canvas, { timestamp: t0, duration: 1 / o.fps });
+        // 色空間を明示した YUV（I420）にしてエンコーダーへ渡す。Canvas のまま渡すと sRGB の RGB として扱われ、
+        // ブラウザ内の変換（行列・レンジ）次第で色が変わることがあるため
+        const rgba = ctx.getImageData(0, 0, width, height).data;
+        yuv = rgbaToI420(rgba, width, height, colorSpace, yuv);
+        return new VideoSample(yuv, { format: 'I420', codedWidth: width, codedHeight: height, timestamp: t0, duration: 1 / o.fps, colorSpace });
       },
       renderAudio: plan.audio ? (a, b) => renderAudioWindow(doc, media, from + a, from + b, a) : undefined,
     });
   } finally {
     await frames.dispose();
   }
+  return used;
 }
