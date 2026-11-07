@@ -22,3 +22,29 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# プロジェクト内に置く npm キャッシュと一時ファイル
+.npm-cache
+.tmp
+
+# テスト用の画像・動画・音楽（commit しない）
+test-media/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.avi
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.flac
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.avif
+!public/**
