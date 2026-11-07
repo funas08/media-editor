@@ -6,18 +6,50 @@ import { mainLayout } from '../core/timeline';
 import type { DocState } from '../core/types';
 
 /** 画質の選び方 */
-export type QualityMode = 'source' | 'high' | 'standard' | 'small' | 'custom';
+export type QualityMode = 'source' | 'max' | 'high' | 'standard' | 'small' | 'custom';
 
 export const QUALITY_MODE_LABEL: Record<QualityMode, string> = {
   source: '元の動画に合わせる',
+  max: '最高画質（品質固定）',
   high: '高画質',
   standard: '標準',
   small: '小さいファイル',
   custom: 'ビットレートを指定',
 };
 
+/** 書き出しの映像コーデック */
+export type OutputCodec = 'avc' | 'hevc' | 'av1';
+
+export const OUTPUT_CODEC_LABEL: Record<OutputCodec, string> = { avc: 'H.264', hevc: 'H.265（HEVC）', av1: 'AV1' };
+
+/** エンコーダーの選び方 */
+export type EncoderPref = 'auto' | 'hardware' | 'software';
+
+export const ENCODER_PREF_LABEL: Record<EncoderPref, string> = { auto: '自動（ハードウェア優先）', hardware: 'ハードウェア', software: 'ソフトウェア' };
+
 /** 「標準」に対する倍率 */
 const MODE_FACTOR: Record<'high' | 'standard' | 'small', number> = { high: 1.5, standard: 1, small: 0.6 };
+
+/**
+ * 元動画のコーデックの効率（H.264 を 1 として、同じ画質に必要なビットレートの比）。
+ * H.265 / VP9 は H.264 の約 1/1.6、AV1 は約 1/2 で同じ画質になる
+ */
+const SOURCE_EFFICIENCY: Record<string, number> = { avc: 1, hevc: 1 / 1.6, vp9: 1 / 1.6, av1: 1 / 2, vp8: 1.1 };
+
+/**
+ * 書き出しのコーデックの効率。ブラウザのエンコーダーは元の動画の作成元（カメラ・OBS など）より効率が落ちやすいので、
+ * 元動画側の値より控えめにしている
+ */
+const OUTPUT_EFFICIENCY: Record<OutputCodec, number> = { avc: 1, hevc: 0.75, av1: 0.65 };
+
+/** ブラウザのエンコーダー（B フレームや先読みが弱い）と、再エンコードによる劣化を補うための倍率 */
+export const BROWSER_ENCODER_FACTOR = 1.3;
+
+/** 「元の動画に合わせる」の上限（標準の何倍まで。ProRes などの非常に高いビットレートの元動画のため） */
+const SOURCE_CAP = 4;
+
+/** 「最高画質（品質固定）」で品質固定が使えないときのビットレート（標準の何倍） */
+const MAX_FALLBACK_FACTOR = 2.5;
 
 /** 音声のビットレート（AAC） */
 export const AUDIO_BITRATE = 192_000;
@@ -28,13 +60,13 @@ const WQHD_30FPS = 16_000_000;
 const PIXEL_EXPONENT = Math.log(2.5) / Math.log(2.25);
 
 /**
- * 「標準」のビットレート（bps）。目安：WQHD 30fps 16Mbps・60fps 24Mbps、4K 30fps 40Mbps・60fps 60Mbps。
- * そのほかの解像度は画素数に応じて同じ曲線で決め、60fps は 30fps の 1.5 倍
+ * 「標準」のビットレート（bps）。H.264 の目安：WQHD 30fps 16Mbps・60fps 24Mbps、4K 30fps 40Mbps・60fps 60Mbps。
+ * そのほかの解像度は画素数に応じて同じ曲線で決め、60fps は 30fps の 1.5 倍。H.265 / AV1 は効率のぶん下げる
  */
-export function standardBitrate(width: number, height: number, fps: number): number {
+export function standardBitrate(width: number, height: number, fps: number, codec: OutputCodec = 'avc'): number {
   const base = WQHD_30FPS * Math.pow((width * height) / WQHD_PIXELS, PIXEL_EXPONENT);
   const k = fps >= 60 ? 1.5 : 1;
-  return roundBitrate(base * k);
+  return roundBitrate(base * k * OUTPUT_EFFICIENCY[codec]);
 }
 
 /** 0.1 Mbps 単位に丸める */
@@ -42,27 +74,82 @@ function roundBitrate(bps: number): number {
   return Math.max(100_000, Math.round(bps / 100_000) * 100_000);
 }
 
-export interface BitrateChoice {
-  /** 映像のビットレート（bps） */
+/** コーデック名（avc / hevc / avc1.640033 など）から効率の表のキーを取り出す */
+export function codecFamily(codec: string | null | undefined): string | null {
+  if (!codec) return null;
+  const head = codec.split('.')[0].toLowerCase();
+  const map: Record<string, string> = { avc1: 'avc', avc3: 'avc', hvc1: 'hevc', hev1: 'hevc', vp09: 'vp9', av01: 'av1' };
+  return map[head] ?? head;
+}
+
+/** 元動画のビットレートとコーデック */
+export interface SourceRate {
   bitrate: number;
+  codec: string | null;
+}
+
+/** 元動画のビットレートを、書き出しのコーデックで同じ画質になるビットレートに換算する（補正の倍率は含めない） */
+export function equivalentBitrate(src: SourceRate, out: OutputCodec): number {
+  const eff = SOURCE_EFFICIENCY[codecFamily(src.codec) ?? 'avc'] ?? 1;
+  return (src.bitrate / eff) * OUTPUT_EFFICIENCY[out];
+}
+
+/** 複数の元動画のうち、書き出しで最も高いビットレートが必要になるもの */
+export function pickHighestSource(sources: SourceRate[], out: OutputCodec): SourceRate | null {
+  let best: SourceRate | null = null;
+  for (const s of sources) if (s.bitrate > 0 && (!best || equivalentBitrate(s, out) > equivalentBitrate(best, out))) best = s;
+  return best;
+}
+
+export interface BitrateChoice {
+  /** 映像のビットレート（bps）。品質固定のときは、品質固定が使えなかった場合のビットレート */
+  bitrate: number;
+  /** 品質固定（QP）の値。null ならビットレート指定 */
+  quantizer: number | null;
   /** 「元の動画に合わせる」で元のビットレートが分からず、標準にしたとき true */
   fellBack: boolean;
+  /** 「元の動画に合わせる」で上限に当たったとき true */
+  capped: boolean;
+}
+
+/** 品質固定の値（H.264 / H.265 は QP 18。AV1 は Mediabunny の尺度 0〜255 で同じ程度の画質） */
+export function maxQualityQuantizer(codec: OutputCodec): number {
+  return codec === 'av1' ? 90 : 18;
 }
 
 /**
  * 画質の選び方からビットレートを決める。
- * sourceMax：メインの動画クリップの元動画のうち、最も高いビットレート（なければ null）
+ * source：メインの元動画のうち、書き出しで最も高いビットレートが必要になるもの（なければ null）
  */
-export function resolveBitrate(mode: QualityMode, size: { width: number; height: number; fps: number }, sourceMax: number | null, customMbps: number): BitrateChoice {
-  const std = standardBitrate(size.width, size.height, size.fps);
+export function resolveBitrate(
+  mode: QualityMode,
+  size: { width: number; height: number; fps: number },
+  source: SourceRate | null,
+  customMbps: number,
+  codec: OutputCodec = 'avc',
+): BitrateChoice {
+  const std = standardBitrate(size.width, size.height, size.fps, codec);
+  const plain = { quantizer: null, fellBack: false, capped: false };
   switch (mode) {
-    case 'source':
-      return sourceMax && sourceMax > 0 ? { bitrate: roundBitrate(sourceMax), fellBack: false } : { bitrate: std, fellBack: true };
+    case 'source': {
+      if (!source || !(source.bitrate > 0)) return { ...plain, bitrate: std, fellBack: true };
+      const want = equivalentBitrate(source, codec) * BROWSER_ENCODER_FACTOR;
+      const cap = std * SOURCE_CAP;
+      return { ...plain, bitrate: roundBitrate(Math.min(want, cap)), capped: want > cap };
+    }
+    case 'max':
+      return { ...plain, bitrate: roundBitrate(std * MAX_FALLBACK_FACTOR), quantizer: maxQualityQuantizer(codec) };
     case 'custom':
-      return { bitrate: roundBitrate(Math.max(0.1, customMbps || 0) * 1e6), fellBack: false };
+      return { ...plain, bitrate: roundBitrate(Math.max(0.1, customMbps || 0) * 1e6) };
     default:
-      return { bitrate: roundBitrate(std * MODE_FACTOR[mode]), fellBack: false };
+      return { ...plain, bitrate: roundBitrate(std * MODE_FACTOR[mode]) };
   }
+}
+
+/** 元動画のキーフレーム間隔に合わせた、書き出しのキーフレーム間隔（秒）。1〜5 秒、分からなければ 2 秒 */
+export function exportKeyFrameInterval(sourceInterval: number | null | undefined): number {
+  if (!sourceInterval || !Number.isFinite(sourceInterval) || sourceInterval <= 0) return 2;
+  return Math.min(5, Math.max(1, Math.round(sourceInterval * 10) / 10));
 }
 
 /** 予想ファイルサイズ（バイト）。可変ビットレートなので実際には前後する。MP4 の管理情報として 0.5% 足す */

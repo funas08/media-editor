@@ -9,11 +9,30 @@ import type { FrameImage, VideoFrameProvider } from '../render/itemRenderers';
 import { drawScene } from '../render/scene';
 import { scheduleSegments } from './audioSchedule';
 import { runExport, type ExportPlan } from './exportPipeline';
-import type { MediaStore } from './MediaStore';
+import type { MediaInfo, MediaStore } from './MediaStore';
 import { SequentialFrames } from './SequentialFrames';
-import { AUDIO_BITRATE, DEFAULT_COLOR_SPACE, mainVideoMediaIds, outputColorSpace, resolveBitrate, rgbaToI420, type BitrateChoice, type OutputColorSpace, type QualityMode } from './encodeSettings';
+import {
+  AUDIO_BITRATE,
+  DEFAULT_COLOR_SPACE,
+  exportKeyFrameInterval as keyFrameFromSource,
+  mainVideoMediaIds,
+  outputColorSpace,
+  pickHighestSource,
+  resolveBitrate,
+  rgbaToI420,
+  standardBitrate,
+  type BitrateChoice,
+  type EncoderPref,
+  type OutputCodec,
+  type OutputColorSpace,
+  type QualityMode,
+  type SourceRate,
+} from './encodeSettings';
 
-export interface VideoExportOptions {
+export type HwAccel = 'no-preference' | 'prefer-hardware' | 'prefer-software';
+
+/** 画質に関わる設定（ダイアログで選ぶもの） */
+export interface QualityPrefs {
   /** キャンバスに対する倍率（1 / 1.5 / 2） */
   scale: number;
   fps: 30 | 60;
@@ -21,35 +40,66 @@ export interface VideoExportOptions {
   mode: QualityMode;
   /** mode が 'custom' のときのビットレート（Mbps） */
   customMbps: number;
+  /** 映像のコーデック */
+  codec: OutputCodec;
+  /** エンコーダーの選び方 */
+  encoder: EncoderPref;
+}
+
+export interface VideoExportOptions extends QualityPrefs {
   includeAudio: boolean;
   /** 書き出す範囲（秒）。null ならタイムライン全体 */
   range: { from: number; to: number } | null;
-  /** ハードウェアエンコーダーを優先する（checkVideoSupport で使えると分かったとき true） */
-  preferHardware: boolean;
+  /** checkVideoSupport で決めた、ハードウェア・ソフトウェアの指定 */
+  hardwareAcceleration: HwAccel;
+  /** 品質固定を使う（「最高画質」で、checkVideoSupport で使えると分かったとき） */
+  useQuantizer: boolean;
 }
 
 /** 書き出しで実際に使ったエンコーダーの設定（完了時の表示用） */
 export interface EncoderUsed {
   codec: string;
   bitrate: number;
+  /** 品質固定で書き出したときの値 */
+  quantizer: number | null;
   hardwareAcceleration: string;
   colorSpace: OutputColorSpace;
+  keyFrameInterval: number;
 }
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
 
-/** メインの動画クリップの元動画のうち、最も高い映像ビットレート（bps）。分からなければ null */
-export function sourceMaxBitrate(doc: DocState, media: MediaStore): number | null {
-  let max = 0;
-  for (const id of mainVideoMediaIds(doc)) max = Math.max(max, media.get(id)?.info.videoBitrate ?? 0);
-  return max > 0 ? max : null;
+/** メインの動画クリップの元動画のビットレートとコーデック */
+function mainSources(doc: DocState, media: MediaStore): { rate: SourceRate; info: MediaInfo }[] {
+  const out: { rate: SourceRate; info: MediaInfo }[] = [];
+  for (const id of mainVideoMediaIds(doc)) {
+    const info = media.get(id)?.info;
+    if (info?.videoBitrate) out.push({ rate: { bitrate: info.videoBitrate, codec: info.codecString ?? info.videoCodec }, info });
+  }
+  return out;
 }
 
-/** 選んだ画質での映像ビットレート */
-export function exportBitrate(doc: DocState, media: MediaStore, o: Pick<VideoExportOptions, 'scale' | 'fps' | 'mode' | 'customMbps'>): BitrateChoice {
+/** 「元の動画に合わせる」の基準にする元動画（書き出しで最も高いビットレートが必要になるもの） */
+export function exportSource(doc: DocState, media: MediaStore, codec: OutputCodec): { rate: SourceRate; info: MediaInfo } | null {
+  const list = mainSources(doc, media);
+  const best = pickHighestSource(list.map((x) => x.rate), codec);
+  return list.find((x) => x.rate === best) ?? null;
+}
+
+/** 選んだ画質での映像ビットレート（と品質固定の値） */
+export function exportBitrate(doc: DocState, media: MediaStore, o: Pick<QualityPrefs, 'scale' | 'fps' | 'mode' | 'customMbps' | 'codec'>): BitrateChoice {
   const { width, height } = videoExportSize(doc, o.scale);
-  return resolveBitrate(o.mode, { width, height, fps: o.fps }, sourceMaxBitrate(doc, media), o.customMbps);
+  return resolveBitrate(o.mode, { width, height, fps: o.fps }, exportSource(doc, media, o.codec)?.rate ?? null, o.customMbps, o.codec);
+}
+
+/** キーフレームの間隔：メインの最初の動画に合わせる（1〜5 秒） */
+export function exportKeyFrameInterval(doc: DocState, media: MediaStore): number {
+  for (const id of mainVideoMediaIds(doc)) {
+    const k = media.get(id)?.info.keyFrameInterval;
+    if (k) return keyFrameFromSource(k);
+  }
+  return keyFrameFromSource(null);
 }
 
 /** 書き出す動画の色空間：メインの最初の動画（なければ最初の動画）の色空間を引き継ぐ */
@@ -63,6 +113,47 @@ export function exportColorSpace(doc: DocState, media: MediaStore): OutputColorS
   return { ...DEFAULT_COLOR_SPACE };
 }
 
+export interface SupportResult {
+  /** 映像を書き出せるか */
+  video: boolean;
+  /** 音声（AAC）を書き出せるか */
+  audio: boolean;
+  /** 使うハードウェア・ソフトウェアの指定 */
+  hardwareAcceleration: HwAccel;
+  /** 品質固定を使えるか（「最高画質」以外では null） */
+  quantizer: boolean | null;
+  /** コーデックごとに、この環境で書き出せるか */
+  codecs: Record<OutputCodec, boolean>;
+}
+
+/**
+ * この環境で書き出せるか。エンコーダーが「自動」ならハードウェア → 指定なしの順に確かめる。
+ * 「最高画質」では、品質固定を使える指定を優先する（どれも使えなければビットレート指定で書き出す）
+ */
+export async function checkVideoSupport(doc: DocState, media: MediaStore, o: QualityPrefs): Promise<SupportResult> {
+  const { width, height } = videoExportSize(doc, o.scale);
+  const choice = exportBitrate(doc, media, o);
+  const accels: HwAccel[] = o.encoder === 'auto' ? ['prefer-hardware', 'no-preference'] : o.encoder === 'hardware' ? ['prefer-hardware'] : ['prefer-software'];
+  const can = (codec: OutputCodec, quality: Quality, hw: HwAccel) =>
+    canEncodeVideo(codec, { width, height, quality, frameRate: o.fps, latencyMode: 'quality', hardwareAcceleration: hw }).catch(() => false);
+  const codecList: OutputCodec[] = ['avc', 'hevc', 'av1'];
+  const [audio, ...codecOk] = await Promise.all([
+    canEncodeAudio('aac', { numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, quality: new Quality({ bitrate: AUDIO_BITRATE }) }).catch(() => false),
+    ...codecList.map((c) => can(c, new Quality({ bitrate: standardBitrate(width, height, o.fps, c) }), 'no-preference')),
+  ]);
+  const codecs = Object.fromEntries(codecList.map((c, i) => [c, codecOk[i]])) as Record<OutputCodec, boolean>;
+  if (choice.quantizer !== null) {
+    for (const hw of accels) {
+      if (await can(o.codec, new Quality({ quantizer: choice.quantizer }), hw)) return { video: true, audio, hardwareAcceleration: hw, quantizer: true, codecs };
+    }
+  }
+  const byBitrate = new Quality({ bitrate: choice.bitrate, bitrateMode: 'variable' });
+  for (const hw of accels) {
+    if (await can(o.codec, byBitrate, hw)) return { video: true, audio, hardwareAcceleration: hw, quantizer: choice.quantizer === null ? null : false, codecs };
+  }
+  return { video: false, audio, hardwareAcceleration: accels[0], quantizer: choice.quantizer === null ? null : false, codecs };
+}
+
 /** 書き出しサイズ（H.264 は幅・高さが偶数である必要があるので切り下げる） */
 export function videoExportSize(doc: DocState, scale: number): { width: number; height: number; adjusted: boolean } {
   const w = Math.round(doc.canvas.width * scale);
@@ -70,23 +161,6 @@ export function videoExportSize(doc: DocState, scale: number): { width: number; 
   const width = Math.max(2, w - (w % 2));
   const height = Math.max(2, h - (h % 2));
   return { width, height, adjusted: width !== w || height !== h };
-}
-
-/**
- * この環境で書き出せるか（映像：H.264、音声：AAC）。映像はまずハードウェアエンコーダーで確かめ、
- * 使えなければ指定なし（ブラウザに任せる）で確かめる
- */
-export async function checkVideoSupport(doc: DocState, media: MediaStore, o: Pick<VideoExportOptions, 'scale' | 'fps' | 'mode' | 'customMbps'>): Promise<{ video: boolean; audio: boolean; hardware: boolean }> {
-  const { width, height } = videoExportSize(doc, o.scale);
-  const quality = new Quality({ bitrate: exportBitrate(doc, media, o).bitrate, bitrateMode: 'variable' });
-  const tryVideo = (hw: 'prefer-hardware' | 'no-preference') =>
-    canEncodeVideo('avc', { width, height, quality, frameRate: o.fps, latencyMode: 'quality', hardwareAcceleration: hw }).catch(() => false);
-  const [hardware, audio] = await Promise.all([
-    tryVideo('prefer-hardware'),
-    canEncodeAudio('aac', { numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, quality: new Quality({ bitrate: AUDIO_BITRATE }) }).catch(() => false),
-  ]);
-  const video = hardware || (await tryVideo('no-preference'));
-  return { video, audio, hardware };
 }
 
 /** 書き出し先を選ぶ。キャンセルなら null。選べないブラウザではメモリに書いて最後にダウンロード */
@@ -187,9 +261,11 @@ export async function exportVideo(
   signal: AbortSignal,
 ): Promise<EncoderUsed> {
   const { width, height } = videoExportSize(doc, o.scale);
-  const bitrate = exportBitrate(doc, media, o).bitrate;
+  const choice = exportBitrate(doc, media, o);
   const colorSpace = exportColorSpace(doc, media);
-  const used: EncoderUsed = { codec: 'avc', bitrate, hardwareAcceleration: o.preferHardware ? 'prefer-hardware' : 'no-preference', colorSpace };
+  const keyFrameInterval = exportKeyFrameInterval(doc, media);
+  const quantizer = o.useQuantizer ? choice.quantizer : null;
+  const used: EncoderUsed = { codec: o.codec, bitrate: choice.bitrate, quantizer, hardwareAcceleration: o.hardwareAcceleration, colorSpace, keyFrameInterval };
   // 範囲（I〜O）を書き出すときは、その開始を 0 秒として書き出す
   const from = o.range ? o.range.from : 0;
   const to = o.range ? o.range.to : totalDuration(doc);
@@ -198,13 +274,17 @@ export async function exportVideo(
     height,
     fps: o.fps,
     duration: Math.max(0, to - from),
-    videoCodec: 'avc',
-    videoBitrate: bitrate,
-    hardwareAcceleration: used.hardwareAcceleration as ExportPlan['hardwareAcceleration'],
+    videoCodec: o.codec,
+    videoBitrate: choice.bitrate,
+    videoQuantizer: quantizer,
+    keyFrameInterval,
+    hardwareAcceleration: o.hardwareAcceleration,
     audio: o.includeAudio ? { bitrate: AUDIO_BITRATE, sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
     colorSpace,
+    // 候補ごとに呼ばれ、最後に呼ばれたものが実際に使われる設定（品質固定が使えずビットレート指定になった場合など）
     onEncoderConfig: (c) => {
       used.codec = c.codec;
+      used.quantizer = c.bitrateMode === 'quantizer' ? quantizer : null;
       console.info('動画のエンコーダー設定', c);
     },
   };

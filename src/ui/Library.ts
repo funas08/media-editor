@@ -28,6 +28,7 @@ function mediaEntry(i: MediaInfo, thumb: string | null): LibraryEntry {
     `映像：${describeCodec(i.codecString ?? i.videoCodec)}`,
     i.videoBitrate ? `ビットレート：${i.bitrateEstimated ? '約 ' : ''}${(i.videoBitrate / 1e6).toFixed(1)} Mbps${i.bitrateEstimated ? '（ファイルサイズからの見積もり）' : ''}` : 'ビットレート：不明',
     `色空間：${describeColorSpace(i.colorSpace)}`,
+    `キーフレーム間隔：${i.keyFrameInterval ? `${i.keyFrameInterval.toFixed(2)} 秒` : '不明'}`,
   ].join('\n');
   return { ...base, bitrateText, details };
 }

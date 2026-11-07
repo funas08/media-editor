@@ -2,7 +2,7 @@
 // Mediabunny の Input を使って中身（長さ・解像度・音声の有無など）を調べ、デコード用のトラックを持つ。
 // 画像の AssetStore と同じく、Undo で戻せるようセッション中は原則として削除しない。
 
-import { ALL_FORMATS, BlobSource, CanvasSink, Input, MP4, QTFF, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
+import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input, MP4, QTFF, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
 import type { SourceColorSpace } from './encodeSettings';
 import { newId } from '../core/doc';
 
@@ -32,6 +32,8 @@ export interface MediaInfo {
   codecString: string | null;
   /** 映像の色空間 */
   colorSpace: SourceColorSpace | null;
+  /** キーフレームの間隔（秒、先頭付近から求めた中央値）。分からなければ null */
+  keyFrameInterval: number | null;
 }
 
 export interface MediaEntry {
@@ -74,6 +76,24 @@ async function videoBitrate(input: Input, video: InputVideoTrack, size: number, 
   return total > 0 ? { bitrate: total, estimated: true } : null;
 }
 
+/** キーフレームの間隔（秒）。先頭から最大 8 個のキーフレームの間隔の中央値（中身は読まない） */
+async function keyFrameInterval(video: InputVideoTrack): Promise<number | null> {
+  const sink = new EncodedPacketSink(video);
+  const opts = { metadataOnly: true };
+  let p = await sink.getFirstPacket(opts);
+  if (p && p.type !== 'key') p = await sink.getNextKeyPacket(p, opts);
+  const gaps: number[] = [];
+  for (let i = 0; p && i < 8; i++) {
+    const next = await sink.getNextKeyPacket(p, opts);
+    if (!next) break;
+    gaps.push(next.timestamp - p.timestamp);
+    p = next;
+  }
+  if (gaps.length === 0) return null;
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
 export class MediaStore {
   private entries = new Map<string, MediaEntry>();
 
@@ -112,6 +132,7 @@ export class MediaStore {
         bitrateEstimated: vb?.estimated ?? false,
         codecString: video ? await video.getCodecParameterString().catch(() => null) : null,
         colorSpace: video ? await video.getColorSpace().catch(() => null) : null,
+        keyFrameInterval: video ? await keyFrameInterval(video).catch(() => null) : null,
       };
       const entry: MediaEntry = { info, file, input, video, audio };
       this.entries.set(id, entry);

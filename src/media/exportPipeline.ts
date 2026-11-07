@@ -11,8 +11,10 @@ export interface ExportPlan {
   /** 長さ（秒） */
   duration: number;
   videoCodec: VideoCodec;
-  /** 映像のビットレート（bps、可変ビットレートの目標値） */
+  /** 映像のビットレート（bps、可変ビットレートの目標値）。品質固定のときは、それが使えない場合の代わり */
   videoBitrate: number;
+  /** 品質固定（QP）で書き出すときの値。null・未指定ならビットレート指定 */
+  videoQuantizer?: number | null;
   /** ハードウェアエンコーダーを優先するか（使えない環境では 'no-preference' を渡す） */
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software';
   /** キーフレームの間隔（秒） */
@@ -55,11 +57,16 @@ export class ExportCanceledError extends Error {
 /** 書き出しを実行する。target には BufferTarget（テスト）や StreamTarget（ファイル）を渡す */
 export async function runExport(plan: ExportPlan, target: Target, cb: ExportCallbacks): Promise<void> {
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: false }), target });
-  // 画質優先：ビットレートを明示した可変ビットレート（指定しないと Mediabunny は量子化値固定になり、ファイルサイズを決められない）、
+  // 画質優先：ビットレートを明示した可変ビットレート（品質レベルだけだと Mediabunny は量子化値固定になり、ファイルサイズを決められない）。
+  // 「最高画質」では品質固定（QP）を使い、使えなければビットレート指定にする。
   // latencyMode は 'quality'（フレームを落とさず、画質を優先）
   const video = new VideoSampleSource({
     codec: plan.videoCodec,
-    quality: new Quality({ bitrate: plan.videoBitrate, bitrateMode: 'variable' }),
+    quality: new Quality(
+      plan.videoQuantizer != null
+        ? { quantizer: plan.videoQuantizer, bitrate: plan.videoBitrate, bitrateMode: 'variable' }
+        : { bitrate: plan.videoBitrate, bitrateMode: 'variable' },
+    ),
     latencyMode: 'quality',
     hardwareAcceleration: plan.hardwareAcceleration ?? 'no-preference',
     keyFrameInterval: plan.keyFrameInterval ?? 2,

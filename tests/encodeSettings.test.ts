@@ -3,7 +3,10 @@ import { ALL_FORMATS, BufferSource, BufferTarget, Input, VideoSample } from 'med
 import { createDoc, createVideoItem } from '../src/core/doc';
 import { describeCodec, parseCodec } from '../src/media/codecName';
 import {
+  codecFamily,
   estimateFileSize,
+  exportKeyFrameInterval,
+  pickHighestSource,
   mainVideoMediaIds,
   outputColorSpace,
   resolveBitrate,
@@ -29,9 +32,48 @@ test('画質：高画質 1.5 倍・小さいファイル 0.6 倍・指定・元�
   assert.equal(resolveBitrate('high', size, null, 0).bitrate, 24e6);
   assert.equal(resolveBitrate('small', size, null, 0).bitrate, 9.6e6);
   assert.equal(resolveBitrate('custom', size, null, 35).bitrate, 35e6);
-  assert.deepEqual(resolveBitrate('source', size, 52_345_678, 0), { bitrate: 52.3e6, fellBack: false });
+  // 元が H.264 なら、元のビットレート × 1.3（再エンコードの劣化を補う）
+  assert.deepEqual(resolveBitrate('source', size, { bitrate: 20e6, codec: 'avc1.640033' }, 0), { bitrate: 26e6, quantizer: null, fellBack: false, capped: false });
   // 元のビットレートが分からなければ標準
-  assert.deepEqual(resolveBitrate('source', size, null, 0), { bitrate: 16e6, fellBack: true });
+  assert.deepEqual(resolveBitrate('source', size, null, 0), { bitrate: 16e6, quantizer: null, fellBack: true, capped: false });
+});
+
+test('画質：元が H.265 / AV1 なら H.264 換算で上げる。上限は標準の 4 倍', () => {
+  const size = { width: 2560, height: 1440, fps: 30 };
+  // H.265 20Mbps → H.264 換算 32Mbps → ×1.3 = 41.6Mbps
+  assert.equal(resolveBitrate('source', size, { bitrate: 20e6, codec: 'hvc1.1.6.L153.B0' }, 0).bitrate, 41.6e6);
+  // AV1 10Mbps → H.264 換算 20Mbps → ×1.3 = 26Mbps
+  assert.equal(resolveBitrate('source', size, { bitrate: 10e6, codec: 'av01.0.08M.08' }, 0).bitrate, 26e6);
+  // 書き出しも H.265 なら、H.265 同士（書き出し側の効率は控えめ）：20 / 0.625 × 0.75 × 1.3 = 31.2Mbps
+  assert.equal(resolveBitrate('source', size, { bitrate: 20e6, codec: 'hevc' }, 0, 'hevc').bitrate, 31.2e6);
+  // ProRes など非常に高いもの：標準 16Mbps × 4 = 64Mbps で止める
+  const pro = resolveBitrate('source', size, { bitrate: 200e6, codec: 'prores' }, 0);
+  assert.deepEqual([pro.bitrate, pro.capped], [64e6, true]);
+});
+
+test('画質：複数の元動画では、書き出しで最も高いビットレートが必要なものを基準にする', () => {
+  const a = { bitrate: 30e6, codec: 'avc1.640033' };
+  const b = { bitrate: 20e6, codec: 'hvc1.1.6.L153.B0' };
+  assert.equal(pickHighestSource([a, b], 'avc'), b);
+  assert.equal(pickHighestSource([], 'avc'), null);
+});
+
+test('画質：最高画質は品質固定（H.264 / H.265 は QP 18）、使えない場合のビットレートは標準の 2.5 倍', () => {
+  const size = { width: 2560, height: 1440, fps: 30 };
+  assert.deepEqual(resolveBitrate('max', size, null, 0), { bitrate: 40e6, quantizer: 18, fellBack: false, capped: false });
+  assert.equal(resolveBitrate('max', size, null, 0, 'av1').quantizer, 90);
+  // H.265 の標準は H.264 の 0.75 倍
+  assert.equal(standardBitrate(2560, 1440, 30, 'hevc'), 12e6);
+});
+
+test('キーフレーム間隔：元に合わせて 1〜5 秒、分からなければ 2 秒', () => {
+  assert.equal(exportKeyFrameInterval(1.001), 1);
+  assert.equal(exportKeyFrameInterval(4.2), 4.2);
+  assert.equal(exportKeyFrameInterval(10), 5);
+  assert.equal(exportKeyFrameInterval(0.5), 1);
+  assert.equal(exportKeyFrameInterval(null), 2);
+  assert.equal(codecFamily('avc1.640033'), 'avc');
+  assert.equal(codecFamily('hev1.1.6.L93.B0'), 'hevc');
 });
 
 test('画質：予想ファイルサイズ', () => {
@@ -110,6 +152,20 @@ test('コーデック名：H.264 のプロファイルとレベル', () => {
   assert.equal(describeCodec('avc1.640033'), 'H.264 High プロファイル・レベル 5.1（avc1.640033）');
   assert.equal(parseCodec('hvc1.1.6.L153.B0')?.level, '5.1');
   assert.equal(describeCodec(null), '不明');
+});
+
+test('書き出し：品質固定（量子化値）の指定でも書き出せる', async () => {
+  registerFakeEncoders();
+  const target = new BufferTarget();
+  const yuv = new Uint8Array(64 * 36 * 1.5);
+  let mode: string | undefined;
+  await runExport(
+    { width: 64, height: 36, fps: 30, duration: 0.5, videoCodec: 'vp9', videoBitrate: 2e6, videoQuantizer: 30, keyFrameInterval: 4, audio: null, onEncoderConfig: (c) => (mode = c.bitrateMode) },
+    target,
+    { renderFrame: async (t) => new VideoSample(yuv, { format: 'I420', codedWidth: 64, codedHeight: 36, timestamp: t, duration: 1 / 30 }) },
+  );
+  assert.equal(mode, 'quantizer');
+  assert.ok(target.buffer && target.buffer.byteLength > 0);
 });
 
 test('書き出し：YUV（I420）のフレームを渡せて、MP4 に色空間の情報が入る（エンコーダーが返さなくても）', async () => {
