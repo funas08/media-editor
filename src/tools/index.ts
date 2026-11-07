@@ -2,6 +2,8 @@
 // 新しいツールはファイルを作ってここに1行追加する。
 
 import './selectTool';
+import './resizeTool';
+import './rotateTool';
 import './arrangeTool';
 import './canvasTool';
 import './handTool';

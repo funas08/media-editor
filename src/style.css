@@ -540,3 +540,168 @@ kbd {
   border-radius: 5px;
   border: 2px solid var(--panel);
 }
+
+/* ---------- アイコンボタン ---------- */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.icon-grid .icon-btn {
+  width: 100%;
+}
+
+/* ---------- レイヤー一覧 ---------- */
+.layers-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 600;
+  text-align: left;
+}
+
+.layers-header:hover {
+  background: var(--panel-2);
+}
+
+.chevron {
+  transition: transform 0.15s;
+  transform: rotate(90deg);
+  color: var(--text-dim);
+}
+
+.layers.collapsed .chevron {
+  transform: rotate(0deg);
+}
+
+.layers.collapsed .layers-body {
+  display: none;
+}
+
+.layer-count {
+  margin-left: auto;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--panel-3);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.layer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 6px;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+
+.layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+}
+
+.layer:hover {
+  background: var(--panel-2);
+}
+
+.layer.selected {
+  background: var(--accent-bg);
+  border-color: rgba(76, 141, 255, 0.5);
+}
+
+.layer.hidden-item .layer-name,
+.layer.hidden-item .layer-thumb {
+  opacity: 0.4;
+}
+
+.layer-thumb {
+  width: 40px;
+  height: 26px;
+  flex: none;
+  object-fit: contain;
+  border-radius: 3px;
+  background: repeating-conic-gradient(#3a3f47 0 25%, #2c3037 0 50%) 0 0 / 8px 8px;
+}
+
+.layer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-rename {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.layer .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.layer .icon-btn.off,
+.layer .icon-btn.on {
+  color: var(--warn);
+}
+
+.layer-empty {
+  padding: 10px 8px;
+  color: var(--text-faint);
+}
+
+.layer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 4px 8px 8px;
+}

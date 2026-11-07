@@ -2,7 +2,7 @@
 
 import { Editor } from '../core/Editor';
 import type { Point } from '../core/types';
-import { addImageItems, deleteSelected, loadAssets, openAsDocument, selectAll } from '../features/commands';
+import { addImageItems, deleteSelected, duplicateSelected, loadAssets, moveLayers, openAsDocument, selectAll } from '../features/commands';
 import { defaultExportName, exportSize, renderToBlob } from '../features/export';
 import { IMAGE_ACCEPT, downloadBlob, filesFromDrop, imagesFromClipboard, isImageFile, pickFiles } from '../io/files';
 import { ACCENT, strokeItem } from '../render/overlay';
@@ -12,6 +12,7 @@ import { getTool, getTools } from '../tools/registry';
 import type { Tool, ToolHost, ToolPointerEvent } from '../tools/Tool';
 import { h } from './controls';
 import { icons } from './icons';
+import { LayerPanel } from './LayerPanel';
 import { LeftPanel } from './LeftPanel';
 import { StatusBar } from './StatusBar';
 import { Toaster } from './toast';
@@ -27,6 +28,7 @@ export class App implements ToolHost {
   private emptyState: HTMLElement;
   private topBar: TopBar;
   private left: LeftPanel;
+  private layers: LayerPanel;
   private status = new StatusBar();
   private toaster = new Toaster();
 
@@ -60,6 +62,8 @@ export class App implements ToolHost {
     this.topBar.saveBtn.disabled = true;
 
     this.left = new LeftPanel(this);
+    this.layers = new LayerPanel(this.editor);
+    this.left.bottom.append(this.layers.el);
     const canvas = h('canvas', { class: 'scene' });
     this.scene = new CanvasSceneView(canvas);
     this.emptyState = h(
@@ -117,6 +121,7 @@ export class App implements ToolHost {
 
   refreshUI(): void {
     this.left.update();
+    this.layers.update();
     this.topBar.update(this.editor, this.view);
     this.emptyState.hidden = this.editor.doc.items.length > 0;
     this.requestRender();
@@ -286,6 +291,11 @@ export class App implements ToolHost {
   private bindKeyboard(): void {
     window.addEventListener('keydown', (e) => {
       if (isTypingTarget(e)) return;
+      // Alt 単独で押したときにブラウザのメニューへフォーカスが移るのを防ぐ（Alt はスナップの一時無効に使う）
+      if (e.key === 'Alt') {
+        e.preventDefault();
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         if (!this.spaceDown) {
@@ -314,6 +324,9 @@ export class App implements ToolHost {
           case 'KeyA':
             selectAll(this.editor);
             break;
+          case 'KeyD':
+            duplicateSelected(this.editor);
+            break;
           case 'Digit0':
           case 'Numpad0':
             this.fitView();
@@ -339,7 +352,12 @@ export class App implements ToolHost {
             else handled = false;
             break;
           default:
-            handled = false;
+            // レイヤーの前面・背面（キー配列に依存しないよう e.key で判定）
+            if (e.key === ']') moveLayers(this.editor, e.shiftKey ? 'top' : 'up');
+            else if (e.key === '[') moveLayers(this.editor, e.shiftKey ? 'bottom' : 'down');
+            else if (e.key === '}') moveLayers(this.editor, 'top');
+            else if (e.key === '{') moveLayers(this.editor, 'bottom');
+            else handled = false;
         }
         if (handled) e.preventDefault();
         return;
@@ -362,6 +380,8 @@ export class App implements ToolHost {
       }
     });
     window.addEventListener('keyup', (e) => {
+      if (e.key === 'Alt') e.preventDefault();
+      this.tool.onKeyUp?.(e, this);
       if (e.code === 'Space' && this.spaceDown) {
         this.spaceDown = false;
         this.updateCursor();

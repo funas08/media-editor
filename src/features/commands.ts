@@ -1,7 +1,7 @@
 // よく使う編集コマンド（すべて Editor 経由で履歴に残す）
 
 import type { Asset } from '../core/AssetStore';
-import { createImageItem } from '../core/doc';
+import { createImageItem, newId } from '../core/doc';
 import type { Editor } from '../core/Editor';
 import { hitTest } from '../core/geometry';
 import type { Item, Point } from '../core/types';
@@ -71,4 +71,74 @@ export function topItemAt(items: readonly Item[], p: Point, includeLocked = fals
     if (hitTest(it, p)) return it;
   }
   return undefined;
+}
+
+/** 選択中のアイテムを複製し、元の直上に置いて選択する */
+export function duplicateSelected(editor: Editor): void {
+  const sel = editor.selection;
+  if (sel.length === 0) return;
+  const newIds: string[] = [];
+  editor.update('複製', (d) => {
+    const out: Item[] = [];
+    for (const it of d.items) {
+      out.push(it);
+      if (!sel.includes(it.id)) continue;
+      const copy = structuredClone(it);
+      copy.id = newId(it.type);
+      copy.name = copyName(it.name);
+      copy.cx += 20;
+      copy.cy += 20;
+      copy.locked = false;
+      copy.visible = true;
+      out.push(copy);
+      newIds.push(copy.id);
+    }
+    d.items = out;
+  });
+  editor.setSelection(newIds);
+}
+
+function copyName(name: string): string {
+  const m = /^(.*?)(?:\.([a-z0-9]+))?$/i.exec(name);
+  const base = m?.[1] ?? name;
+  const ext = m?.[2] ? `.${m[2]}` : '';
+  return `${base} のコピー${ext}`;
+}
+
+/** 選択中のレイヤーを1つ上（前面）／下（背面）、または最前面／最背面へ */
+export function moveLayers(editor: Editor, dir: 'up' | 'down' | 'top' | 'bottom'): void {
+  const sel = editor.selection;
+  if (sel.length === 0) return;
+  const label = { up: '前面へ', down: '背面へ', top: '最前面へ', bottom: '最背面へ' }[dir];
+  editor.update(label, (d) => {
+    const items = d.items;
+    const isSel = (it: Item) => sel.includes(it.id);
+    if (dir === 'top' || dir === 'bottom') {
+      const picked = items.filter(isSel);
+      const rest = items.filter((it) => !isSel(it));
+      d.items = dir === 'top' ? [...rest, ...picked] : [...picked, ...rest];
+      return;
+    }
+    if (dir === 'up') {
+      for (let i = items.length - 2; i >= 0; i--) {
+        if (isSel(items[i]) && !isSel(items[i + 1])) [items[i], items[i + 1]] = [items[i + 1], items[i]];
+      }
+    } else {
+      for (let i = 1; i < items.length; i++) {
+        if (isSel(items[i]) && !isSel(items[i - 1])) [items[i], items[i - 1]] = [items[i - 1], items[i]];
+      }
+    }
+  });
+}
+
+export function setItemProps(editor: Editor, id: string, label: string, props: Partial<Pick<Item, 'visible' | 'locked' | 'name'>>): void {
+  editor.update(label, (d) => {
+    const it = d.items.find((x) => x.id === id);
+    if (it) Object.assign(it, props);
+  });
+}
+
+/** 操作対象：選択中で、表示中かつロックされていないアイテム */
+export function editableSelection(editor: Editor): Item[] {
+  return editor.doc.items.filter((it) => editor.selection.includes(it.id) && it.visible && !it.locked);
 }

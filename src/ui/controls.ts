@@ -153,3 +153,10 @@ export function text(initial = '', cls = 'value'): { el: HTMLElement; set(v: str
     },
   };
 }
+
+/** アイコンだけのボタン（整列など） */
+export function iconButton(icon: string, title: string, onClick: () => void): HTMLButtonElement {
+  const b = h('button', { class: 'icon-btn', type: 'button', title, 'aria-label': title, onclick: onClick, html: icon }) as HTMLButtonElement;
+  b.addEventListener('mousedown', (e) => e.preventDefault());
+  return b;
+}

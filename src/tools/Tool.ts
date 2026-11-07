@@ -64,6 +64,7 @@ export interface Tool {
   onDoubleClick?(e: ToolPointerEvent, host: ToolHost): void;
   /** 処理した場合は true を返す（既定の動作を止める） */
   onKeyDown?(e: KeyboardEvent, host: ToolHost): boolean;
+  onKeyUp?(e: KeyboardEvent, host: ToolHost): void;
 
   /** 画面座標でオーバーレイ（ハンドルなど）を描く */
   drawOverlay?(ctx: CanvasRenderingContext2D, host: ToolHost): void;
