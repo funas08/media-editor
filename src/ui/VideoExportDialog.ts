@@ -1,6 +1,6 @@
 // 動画の書き出しダイアログ：MP4（映像 H.264 / H.265 / AV1 + 音声 AAC）、倍率（WQHD×1.5 = 4K）、30 / 60fps、画質。
 // 書き出す前に、この環境でエンコードできるかを確かめる。AAC が使えないときは理由を示し「音声なしで書き出す」を選べる。
-// 画質は「元の動画に合わせる」（既定）/ 最高画質（品質固定）/ 高画質 / 標準 / 小さいファイル / ビットレートを指定。
+// 画質は「元の画質を優先（可能な区間は無劣化コピー）」（既定）/「元の動画に合わせる」/ 最高画質（品質固定）/ 高画質 / 標準 / 小さいファイル / ビットレートを指定。
 // エンコーダーは自動（ハードウェア優先）/ ハードウェア / ソフトウェアから選べる（比べるため）。予想ファイルサイズも表示する。
 
 import type { AssetStore } from '../core/AssetStore';
@@ -14,6 +14,7 @@ import {
   exportKeyFrameInterval,
   exportSource,
   exportVideo,
+  smartPlanFor,
   videoExportSize,
   type HwAccel,
   type QualityPrefs,
@@ -38,19 +39,24 @@ import {
 } from '../media/encodeSettings';
 import { ExportCanceledError } from '../media/exportPipeline';
 import type { MediaStore } from '../media/MediaStore';
+import { formatSeconds, type SmartPlan } from '../media/smartCopy';
+import { mainVideoMediaIds } from '../media/encodeSettings';
 import { button, checkbox, group, h, hint, numberInput, segmented, selectInput, text } from './controls';
 import { openDialog } from './Dialog';
 
 const STORAGE_KEY = 'image-editor.videoExport';
 
+/** 保存する設定の版。2：「元の画質を優先」を追加して既定にした（それより前に保存した画質の選択は引き継がない） */
+const PREFS_VERSION = 2;
+
 function loadPrefs(): QualityPrefs {
-  const def: QualityPrefs = { scale: 1, fps: 30, mode: 'source', customMbps: 20, codec: 'avc', encoder: 'auto' };
+  const def: QualityPrefs = { scale: 1, fps: 30, mode: 'smart', customMbps: 20, codec: 'avc', encoder: 'auto' };
   try {
-    const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<QualityPrefs> | null;
+    const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as (Partial<QualityPrefs> & { v?: number }) | null;
     return {
       scale: [1, 1.5, 2].includes(p?.scale ?? 0) ? p!.scale! : def.scale,
       fps: p?.fps === 60 ? 60 : 30,
-      mode: p?.mode && p.mode in QUALITY_MODE_LABEL ? p.mode : def.mode,
+      mode: p?.v === PREFS_VERSION && p.mode && p.mode in QUALITY_MODE_LABEL ? p.mode : def.mode,
       customMbps: typeof p?.customMbps === 'number' && p.customMbps > 0 ? p.customMbps : def.customMbps,
       codec: p?.codec && p.codec in OUTPUT_CODEC_LABEL ? p.codec : def.codec,
       encoder: p?.encoder && p.encoder in ENCODER_PREF_LABEL ? p.encoder : def.encoder,
@@ -84,6 +90,9 @@ export function openVideoExportDialog(
   const durationNow = () => (useRange && ioRange ? ioRange.to - ioRange.from : fullDuration);
   const hasAudio = audioSegments(doc).some((s) => media.get(s.mediaId)?.audio);
   const prefs = loadPrefs();
+  // 元の画質を優先するときは、コーデックとフレームレートをメインの最初の動画に合わせておく（無劣化コピーの条件）
+  if (prefs.mode === 'smart') matchSource();
+  let smartPlan: SmartPlan | null = null;
   let aacOk = true;
   let videoOk = true;
   let checking = true;
@@ -138,6 +147,11 @@ export function openVideoExportDialog(
     prefs.mode,
     (v) => {
       prefs.mode = v;
+      if (v === 'smart') {
+        matchSource();
+        codecSel.set(prefs.codec);
+        fpsSeg.set(String(prefs.fps));
+      }
       void recheck();
     },
   );
@@ -159,6 +173,9 @@ export function openVideoExportDialog(
   const bitrateNote = text('', 'hint pre-line');
   const scaleWarn = text('', 'hint');
   const colorNote = text('', 'hint');
+  const smartText = text('', 'value');
+  const smartNote = text('', 'hint pre-line');
+  const smartGroup = group('無劣化コピー', smartText.el, smartNote.el);
   const rangeSeg = segmented<string>(
     [
       { value: 'all', label: 'タイムライン全体' },
@@ -169,14 +186,14 @@ export function openVideoExportDialog(
       if (v === 'io' && !ioRange) return;
       useRange = v === 'io';
       rangeSeg.set(v);
-      update();
+      void recheck();
     },
   );
   const rangeNote = text(ioRange ? `I〜O：${formatTime(ioRange.from)} 〜 ${formatTime(ioRange.to)}` : 'I〜O の範囲は未指定です（タイムラインで I / O キー）', 'hint');
   const sizeText = text('', 'export-size');
   const sizeNote = text('', 'hint');
   const support = text('確認中…', 'hint');
-  const noAudioCb = checkbox('音声なしで書き出す', !hasAudio, () => update());
+  const noAudioCb = checkbox('音声なしで書き出す', !hasAudio, () => void recheck());
   const progress = h('progress', { class: 'progress', max: 1, value: 0 }) as HTMLProgressElement;
   const progressText = text('', 'hint');
   const progressWrap = h('div', { class: 'progress-wrap' }, progress, progressText.el);
@@ -195,6 +212,7 @@ export function openVideoExportDialog(
     group('映像のコーデック', codecSel.el, codecNote.el),
     group('エンコーダー', encoderSel.el, encoderNote.el),
     group('画質', h('div', { class: 'row-inline' }, qualitySel.el, mbpsInput.el), bitrateText.el, bitrateNote.el),
+    smartGroup,
     group('音声', noAudioCb.el),
     group('色空間', colorNote.el),
     progressWrap,
@@ -249,7 +267,8 @@ export function openVideoExportDialog(
     }
     const src = exportSource(doc, media, prefs.codec);
     const notes: string[] = [];
-    if (prefs.mode === 'source') {
+    if (prefs.mode === 'smart') notes.push('無劣化コピーできない区間は、下の基準のビットレートで再エンコードします');
+    if (prefs.mode === 'source' || prefs.mode === 'smart') {
       if (choice.fellBack || !src) {
         notes.push('元の動画のビットレートが分からないため（メインに動画がないなど）、「標準」の値にしています');
       } else {
@@ -282,11 +301,43 @@ export function openVideoExportDialog(
         : '',
     );
     scaleWarn.el.classList.toggle('warn', scaled.length > 0);
+    updateSmart();
     colorNote.set(`${describeColorSpace(exportColorSpace(doc, media))}（メインの最初の動画に合わせます）`);
     noAudioCb.input.disabled = !hasAudio || running;
     for (const c of controls) c.disabled = running;
     const withAudio = hasAudio && !noAudioCb.input.checked;
     exportBtn.disabled = running || checking || durationNow() <= 0 || !videoOk || (withAudio && !aacOk);
+  }
+
+  /** コーデックとフレームレートを、メインの最初の動画に合わせる */
+  function matchSource(): void {
+    const id = mainVideoMediaIds(doc)[0];
+    const info = id ? media.get(id)?.info : undefined;
+    if (!info) return;
+    const fam = codecFamily(info.codecString ?? info.videoCodec);
+    if (fam === 'avc' || fam === 'hevc') prefs.codec = fam;
+    if (Math.abs(info.fps - 60) / 60 < 0.01) prefs.fps = 60;
+    else if (Math.abs(info.fps - 30) / 30 < 0.01) prefs.fps = 30;
+  }
+
+  /** 無劣化コピーの表示 */
+  function updateSmart(): void {
+    smartGroup.hidden = prefs.mode !== 'smart';
+    if (prefs.mode !== 'smart') return;
+    const p = smartPlan;
+    if (checking || !p) {
+      smartText.set('確認中…');
+      smartNote.set('');
+      return;
+    }
+    smartText.set(`無劣化コピーできる区間：${formatSeconds(p.copySeconds)} / 全体 ${formatSeconds(p.totalSeconds)}`);
+    const lines: string[] = [];
+    if (prefs.codec !== 'avc' && prefs.codec !== 'hevc') lines.push('⚠ 無劣化コピーは H.264 / H.265 のみです。コーデックを元の動画に合わせてください');
+    if (p.copySeconds < p.totalSeconds - 1e-3 && p.reasons.length) lines.push('コピーできない区間の理由（その区間は再エンコード）：', ...p.reasons.map((r) => `・${r}`));
+    if (p.copySeconds === 0) lines.push('コピーできる区間がないため、全体を「元の動画に合わせる」と同じ設定で書き出します');
+    const withAudio = hasAudio && !noAudioCb.input.checked;
+    if (withAudio) lines.push(p.audio.copy ? '音声：元の音声をそのままコピー' : `音声：再エンコード（${p.audio.reason ?? ''}）`);
+    smartNote.set(lines.join('\n'));
   }
 
   async function recheck(): Promise<void> {
@@ -295,6 +346,10 @@ export function openVideoExportDialog(
     update();
     const r = await checkVideoSupport(doc, media, prefs);
     if (seq !== checkSeq) return;
+    if (prefs.mode === 'smart') {
+      smartPlan = await smartPlanFor(doc, media, { prefs, range: useRange && ioRange ? ioRange : null, includeAudio: hasAudio && !noAudioCb.input.checked, hardwareAcceleration: r.hardwareAcceleration });
+      if (seq !== checkSeq) return;
+    }
     checking = false;
     videoOk = r.video;
     aacOk = r.audio;
@@ -312,7 +367,7 @@ export function openVideoExportDialog(
   async function run(): Promise<void> {
     if (exportBtn.disabled) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prefs, v: PREFS_VERSION }));
     } catch {
       // 保存できなくても書き出しには影響しない
     }
@@ -327,7 +382,7 @@ export function openVideoExportDialog(
     update();
     const startedAt = performance.now();
     try {
-      const used = await exportVideo(
+      const result = await exportVideo(
         doc,
         assets,
         media,
@@ -348,8 +403,13 @@ export function openVideoExportDialog(
         controller.signal,
       );
       await dest.finish();
+      const used = result.used;
       const rate = used.quantizer !== null ? `品質固定 QP ${used.quantizer}` : formatMbps(used.bitrate);
-      toast(`動画を書き出しました（${formatTime((performance.now() - startedAt) / 1000, false)}・${describeCodec(used.codec)}・${rate}・${ACCEL_LABEL[used.hardwareAcceleration as HwAccel] ?? used.hardwareAcceleration}）`);
+      const sm = result.smart;
+      const smartText = sm
+        ? `・無劣化コピー ${formatSeconds(sm.copiedSeconds)}／再エンコード ${formatSeconds(sm.encodedSeconds)}${result.audioCopied ? '・音声はコピー' : ''}`
+        : '';
+      toast(`動画を書き出しました（${formatTime((performance.now() - startedAt) / 1000, false)}・${describeCodec(used.codec)}・${rate}・${ACCEL_LABEL[used.hardwareAcceleration as HwAccel] ?? used.hardwareAcceleration}${smartText}）`);
       running = false;
       dlg.close();
     } catch (e) {

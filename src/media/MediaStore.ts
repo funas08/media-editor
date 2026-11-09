@@ -4,6 +4,8 @@
 
 import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input, MP4, QTFF, type InputAudioTrack, type InputVideoTrack } from 'mediabunny';
 import type { SourceColorSpace } from './encodeSettings';
+import type { SourceVideoMeta } from './smartCopy';
+import type { CopySource } from './smartExport';
 import { newId } from '../core/doc';
 
 export interface MediaInfo {
@@ -94,8 +96,23 @@ async function keyFrameInterval(video: InputVideoTrack): Promise<number | null> 
   return gaps[Math.floor(gaps.length / 2)];
 }
 
+/** 全部のキーフレームの時刻（中身は読まない。MP4 は索引から読むので速い） */
+async function allKeyTimes(video: InputVideoTrack): Promise<number[]> {
+  const sink = new EncodedPacketSink(video);
+  const opts = { metadataOnly: true };
+  const out: number[] = [];
+  let p = await sink.getFirstKeyPacket(opts);
+  while (p) {
+    out.push(p.timestamp);
+    p = await sink.getNextKeyPacket(p, opts);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 export class MediaStore {
   private entries = new Map<string, MediaEntry>();
+  /** 無劣化コピーの判定に使う情報（調べるのに少し時間がかかるので、最初に必要になったときに作って覚えておく） */
+  private smartMetas = new Map<string, Promise<SourceVideoMeta | null>>();
 
   /** ファイルを調べて登録する。読めない場合は MediaLoadError */
   async add(file: File, id: string = newId('media')): Promise<MediaEntry> {
@@ -159,6 +176,56 @@ export class MediaStore {
     return c.toDataURL('image/jpeg', 0.8);
   }
 
+  /** 無劣化コピーの判定に使う情報（キーフレームの一覧など）。映像がなければ null */
+  smartMeta(id: string): Promise<SourceVideoMeta | null> {
+    let p = this.smartMetas.get(id);
+    if (!p) {
+      p = this.loadSmartMeta(id).catch((e) => {
+        console.warn('無劣化コピーの情報を読み取れませんでした', e);
+        return null;
+      });
+      this.smartMetas.set(id, p);
+    }
+    return p;
+  }
+
+  private async loadSmartMeta(id: string): Promise<SourceVideoMeta | null> {
+    const e = this.entries.get(id);
+    if (!e?.video) return null;
+    const v = e.video;
+    const cs = e.info.colorSpace;
+    const hdr = (await v.hasHighDynamicRange().catch(() => false)) || cs?.primaries === 'bt2020' || cs?.transfer === 'pq' || cs?.transfer === 'hlg';
+    const audioConfig = e.audio ? await e.audio.getDecoderConfig().catch(() => null) : null;
+    return {
+      codecString: e.info.codecString,
+      width: e.info.width,
+      height: e.info.height,
+      fps: e.info.fps,
+      rotation: await v.getRotation().catch(() => 0),
+      hdr,
+      keyTimes: await allKeyTimes(v),
+      endTime: await v.computeDuration(),
+      audio: e.audio ? { codec: e.audio.codec ?? null, sampleRate: audioConfig?.sampleRate ?? e.audio.sampleRate, channels: audioConfig?.numberOfChannels ?? e.audio.numberOfChannels } : null,
+    };
+  }
+
+  /** 無劣化コピーで元のパケットを読むための部品 */
+  async copySource(id: string): Promise<CopySource | null> {
+    const e = this.entries.get(id);
+    if (!e?.video) return null;
+    const dc = await e.video.getDecoderConfig();
+    const d = dc?.description;
+    const description = !d ? null : d instanceof Uint8Array ? d : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d);
+    return {
+      video: new EncodedPacketSink(e.video),
+      description,
+      codecString: dc?.codec ?? e.info.codecString,
+      endTime: await e.video.computeDuration(),
+      audio: e.audio ? new EncodedPacketSink(e.audio) : null,
+      audioConfig: e.audio ? await e.audio.getDecoderConfig() : null,
+    };
+  }
+
   get(id: string): MediaEntry | undefined {
     return this.entries.get(id);
   }
@@ -173,6 +240,7 @@ export class MediaStore {
       if (ids.has(id)) continue;
       e.input.dispose();
       this.entries.delete(id);
+      this.smartMetas.delete(id);
     }
   }
 }

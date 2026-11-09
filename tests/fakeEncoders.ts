@@ -22,6 +22,29 @@ class FakeVideoEncoder extends CustomVideoEncoder {
   close(): void {}
 }
 
+/** 仮の H.264 エンコーダー（無劣化コピーのつなぎ目のテスト用）。SPS のレベルを 4.1 にして元動画（4.0）と区別する */
+const FAKE_SPS = [0x67, 0x64, 0x00, 0x29, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc6, 0x58];
+const FAKE_PPS = [0x68, 0xee, 0x3c];
+export const FAKE_AVCC = new Uint8Array([1, 0x64, 0, 0x29, 0xff, 0xe1, 0, FAKE_SPS.length, ...FAKE_SPS, 1, 0, FAKE_PPS.length, ...FAKE_PPS]);
+
+class FakeAvcEncoder extends CustomVideoEncoder {
+  private n = 0;
+  static override supports(codec: string): boolean {
+    return codec === 'avc';
+  }
+  init(): void {
+    this.n = 0;
+  }
+  encode(sample: VideoSample): void {
+    const key = this.n++ % 60 === 0;
+    const nal = key ? [0x65, 0xee] : [0x41, 0xee];
+    const meta = key ? { decoderConfig: { codec: 'avc1.640029', codedWidth: this.config.width, codedHeight: this.config.height, description: FAKE_AVCC } } : undefined;
+    this.onPacket(new EncodedPacket(new Uint8Array([0, 0, 0, nal.length, ...nal]), key ? 'key' : 'delta', sample.timestamp, sample.duration), meta);
+  }
+  flush(): void {}
+  close(): void {}
+}
+
 class FakeAacEncoder extends CustomAudioEncoder {
   private sent = false;
   static override supports(codec: string): boolean {
@@ -46,5 +69,6 @@ export function registerFakeEncoders(): void {
   if (registered) return;
   registered = true;
   registerEncoder(FakeVideoEncoder);
+  registerEncoder(FakeAvcEncoder);
   registerEncoder(FakeAacEncoder);
 }

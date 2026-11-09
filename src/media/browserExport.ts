@@ -10,6 +10,8 @@ import { drawScene } from '../render/scene';
 import { scheduleSegments } from './audioSchedule';
 import { runExport, type ExportPlan } from './exportPipeline';
 import type { MediaInfo, MediaStore } from './MediaStore';
+import { planSmartCopy, type SmartPlan, type SourceVideoMeta } from './smartCopy';
+import { copyAudioFeed, encodeAudioFeed, mediabunnyEncoderFactory, runSmartExport, type CopySource, type SegmentEncoderFactory, type SmartExportStats } from './smartExport';
 import { SequentialFrames } from './SequentialFrames';
 import {
   AUDIO_BITRATE,
@@ -67,8 +69,8 @@ export interface EncoderUsed {
   keyFrameInterval: number;
 }
 
-const SAMPLE_RATE = 48000;
-const CHANNELS = 2;
+export const SAMPLE_RATE = 48000;
+export const CHANNELS = 2;
 
 /** メインの動画クリップの元動画のビットレートとコーデック */
 function mainSources(doc: DocState, media: MediaStore): { rate: SourceRate; info: MediaInfo }[] {
@@ -163,6 +165,77 @@ export function videoExportSize(doc: DocState, scale: number): { width: number; 
   return { width, height, adjusted: width !== w || height !== h };
 }
 
+// ---- 無劣化コピー ----
+
+/** 書き出しで使う、メインの元動画の無劣化コピー用の情報 */
+async function smartMetas(doc: DocState, media: MediaStore): Promise<Map<string, SourceVideoMeta>> {
+  const out = new Map<string, SourceVideoMeta>();
+  for (const id of mainVideoMediaIds(doc)) {
+    const m = await media.smartMeta(id);
+    if (m) out.set(id, m);
+  }
+  return out;
+}
+
+/** このコーデック文字列（プロファイル・レベル）で、この大きさをエンコードできるか（つなぎ目の再エンコード用） */
+async function canEncodeProfile(codecString: string, width: number, height: number, fps: number, hw: HwAccel): Promise<boolean> {
+  const VE = (globalThis as { VideoEncoder?: typeof VideoEncoder }).VideoEncoder;
+  if (!VE) return false;
+  try {
+    const r = await VE.isConfigSupported({ codec: codecString, width, height, framerate: fps, bitrate: standardBitrate(width, height, fps), hardwareAcceleration: hw, latencyMode: 'quality' });
+    return r.supported === true;
+  } catch {
+    return false;
+  }
+}
+
+export interface SmartCheckOptions {
+  prefs: QualityPrefs;
+  range: { from: number; to: number } | null;
+  includeAudio: boolean;
+  hardwareAcceleration: HwAccel;
+  /** つなぎ目を ffmpeg でエンコードするとき true（プロファイルの確認を ffmpeg に任せる） */
+  ffmpeg?: boolean;
+}
+
+/** 無劣化コピーの計画（ダイアログの表示と書き出しで共通） */
+export async function smartPlanFor(doc: DocState, media: MediaStore, o: SmartCheckOptions): Promise<SmartPlan> {
+  const { width, height } = videoExportSize(doc, o.prefs.scale);
+  const metas = await smartMetas(doc, media);
+  const supported = new Map<string, boolean>();
+  for (const m of metas.values()) {
+    if (!m.codecString || supported.has(m.codecString)) continue;
+    supported.set(m.codecString, o.ffmpeg ? ffmpegProfileOk(m.codecString) : await canEncodeProfile(m.codecString, width, height, o.prefs.fps, o.hardwareAcceleration));
+  }
+  return planSmartCopy(doc, metas, {
+    width,
+    height,
+    fps: o.prefs.fps,
+    codec: o.prefs.codec,
+    scale: o.prefs.scale,
+    from: o.range?.from ?? 0,
+    to: o.range?.to ?? totalDuration(doc),
+    includeAudio: o.includeAudio,
+    audioSampleRate: SAMPLE_RATE,
+    audioChannels: CHANNELS,
+    canEncodeProfile: (c) => supported.get(c) === true,
+  });
+}
+
+/** ffmpeg（x264 / x265）で元動画と同じプロファイルにできるか：4:2:0・8 ビットのプロファイルのみ */
+export function ffmpegProfileOk(codecString: string): boolean {
+  const [head, p] = codecString.split('.');
+  if (head === 'avc1' || head === 'avc3') {
+    const profile = parseInt((p ?? '').slice(0, 2), 16);
+    return [66, 77, 100].includes(profile);
+  }
+  if (head === 'hvc1' || head === 'hev1') {
+    // hvc1.1.〜（Main）のみ。Main 10 などは 10 ビットのため不可
+    return /^\D?1$/.test(p ?? '');
+  }
+  return false;
+}
+
 /** 書き出し先を選ぶ。キャンセルなら null。選べないブラウザではメモリに書いて最後にダウンロード */
 export async function chooseVideoTarget(suggestedName: string): Promise<{ target: Target; finish: () => Promise<void>; abort: () => Promise<void> } | null> {
   type Picker = (o: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<FileSystemFileHandle>;
@@ -250,6 +323,46 @@ async function renderAudioWindow(doc: DocState, media: MediaStore, t0: number, t
   return new AudioSample({ data, format: 'f32-planar', numberOfChannels: CHANNELS, sampleRate: SAMPLE_RATE, timestamp });
 }
 
+/** 書き出す動画の時刻 → 原寸のフレーム（I420・色空間付き）を作る */
+function frameRenderer(doc: DocState, assets: AssetStore, media: MediaStore, width: number, height: number, from: number, colorSpace: OutputColorSpace) {
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) throw new Error('書き出し用の Canvas を作成できませんでした');
+  // I420 の作業用（フレームごとに使い回す。VideoSample が中身を複製する）
+  let yuv: Uint8Array | undefined;
+  const frames = new ExportFrames(media);
+  return {
+    /** t0：書き出す動画の時刻、duration：そのフレームの長さ */
+    render: async (t0: number, duration: number): Promise<VideoSample> => {
+      const t = from + t0;
+      await frames.prepare(doc, t);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      // 動画は透明を持てないので、キャンバスの外側や透明部分は黒にする
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, width, height);
+      ctx.setTransform(width / doc.canvas.width, 0, 0, height / doc.canvas.height, 0, 0);
+      drawScene(ctx, doc, { assets, pixelScale: width / doc.canvas.width, time: t, frames });
+      // 色空間を明示した YUV（I420）にしてエンコーダーへ渡す。Canvas のまま渡すと sRGB の RGB として扱われ、
+      // ブラウザ内の変換（行列・レンジ）次第で色が変わることがあるため
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      yuv = rgbaToI420(rgba, width, height, colorSpace, yuv);
+      return new VideoSample(yuv, { format: 'I420', codedWidth: width, codedHeight: height, timestamp: t0, duration, colorSpace });
+    },
+    /** 描いたフレームの I420 の中身（ffmpeg に送るとき用。次の render で上書きされる） */
+    lastYuv: () => yuv,
+    dispose: () => frames.dispose(),
+  };
+}
+
+/** 書き出しの結果（完了時の表示用） */
+export interface ExportResult {
+  used: EncoderUsed;
+  /** 無劣化コピーを使ったときの内訳 */
+  smart: SmartExportStats | null;
+  /** 音声をコピーしたか */
+  audioCopied: boolean;
+}
+
 /** 動画を書き出す */
 export async function exportVideo(
   doc: DocState,
@@ -259,7 +372,7 @@ export async function exportVideo(
   target: Target,
   onProgress: (ratio: number) => void,
   signal: AbortSignal,
-): Promise<EncoderUsed> {
+): Promise<ExportResult> {
   const { width, height } = videoExportSize(doc, o.scale);
   const choice = exportBitrate(doc, media, o);
   const colorSpace = exportColorSpace(doc, media);
@@ -269,54 +382,96 @@ export async function exportVideo(
   // 範囲（I〜O）を書き出すときは、その開始を 0 秒として書き出す
   const from = o.range ? o.range.from : 0;
   const to = o.range ? o.range.to : totalDuration(doc);
-  const plan: ExportPlan = {
-    width,
-    height,
-    fps: o.fps,
-    duration: Math.max(0, to - from),
-    videoCodec: o.codec,
-    videoBitrate: choice.bitrate,
-    videoQuantizer: quantizer,
-    keyFrameInterval,
-    hardwareAcceleration: o.hardwareAcceleration,
-    audio: o.includeAudio ? { bitrate: AUDIO_BITRATE, sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
-    colorSpace,
-    // 候補ごとに呼ばれ、最後に呼ばれたものが実際に使われる設定（品質固定が使えずビットレート指定になった場合など）
-    onEncoderConfig: (c) => {
-      used.codec = c.codec;
-      used.quantizer = c.bitrateMode === 'quantizer' ? quantizer : null;
-      console.info('動画のエンコーダー設定', c);
-    },
+  const duration = Math.max(0, to - from);
+  const onEncoderConfig = (c: VideoEncoderConfig) => {
+    used.codec = c.codec;
+    used.quantizer = c.bitrateMode === 'quantizer' ? quantizer : null;
+    console.info('動画のエンコーダー設定', c);
   };
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d', { alpha: false });
-  if (!ctx) throw new Error('書き出し用の Canvas を作成できませんでした');
-  // I420 の作業用（フレームごとに使い回す。VideoSample が中身を複製する）
-  let yuv: Uint8Array | undefined;
-  const frames = new ExportFrames(media);
+  const renderer = frameRenderer(doc, assets, media, width, height, from, colorSpace);
   try {
+    // 元の画質を優先：無劣化コピーできる区間があればコピーと再エンコードを組み合わせる
+    if (o.mode === 'smart' && (o.codec === 'avc' || o.codec === 'hevc')) {
+      const plan = await smartPlanFor(doc, media, { prefs: o, range: o.range, includeAudio: o.includeAudio, hardwareAcceleration: o.hardwareAcceleration });
+      if (plan.copySeconds > 0) {
+        const encoder = mediabunnyEncoderFactory({ codec: o.codec, bitrate: choice.bitrate, hardwareAcceleration: o.hardwareAcceleration, keyFrameInterval, onEncoderConfig });
+        const r = await exportSmart(media, plan, { width, height, fps: o.fps, codec: o.codec, duration, colorSpace, from, includeAudio: o.includeAudio }, target, {
+          encoder,
+          render: renderer.render,
+          audioFeed: (sources) => (plan.audio.copy ? copyAudioFeed(plan.audio.parts, sources) : encodeAudioFeed({ bitrate: AUDIO_BITRATE, duration, render: (a, b) => renderAudioWindow(doc, media, from + a, from + b, a) })),
+          onProgress,
+          signal,
+        });
+        if (plan.codecString) used.codec = plan.codecString;
+        return { used, smart: r, audioCopied: o.includeAudio && plan.audio.copy };
+      }
+    }
+    const plan: ExportPlan = {
+      width,
+      height,
+      fps: o.fps,
+      duration,
+      videoCodec: o.codec,
+      videoBitrate: choice.bitrate,
+      videoQuantizer: quantizer,
+      keyFrameInterval,
+      hardwareAcceleration: o.hardwareAcceleration,
+      audio: o.includeAudio ? { bitrate: AUDIO_BITRATE, sampleRate: SAMPLE_RATE, channels: CHANNELS } : null,
+      colorSpace,
+      // 候補ごとに呼ばれ、最後に呼ばれたものが実際に使われる設定（品質固定が使えずビットレート指定になった場合など）
+      onEncoderConfig,
+    };
     await runExport(plan, target, {
       signal,
       onProgress,
-      renderFrame: async (t0) => {
-        const t = from + t0;
-        await frames.prepare(doc, t);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        // 動画は透明を持てないので、キャンバスの外側や透明部分は黒にする
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, width, height);
-        ctx.setTransform(width / doc.canvas.width, 0, 0, height / doc.canvas.height, 0, 0);
-        drawScene(ctx, doc, { assets, pixelScale: width / doc.canvas.width, time: t, frames });
-        // 色空間を明示した YUV（I420）にしてエンコーダーへ渡す。Canvas のまま渡すと sRGB の RGB として扱われ、
-        // ブラウザ内の変換（行列・レンジ）次第で色が変わることがあるため
-        const rgba = ctx.getImageData(0, 0, width, height).data;
-        yuv = rgbaToI420(rgba, width, height, colorSpace, yuv);
-        return new VideoSample(yuv, { format: 'I420', codedWidth: width, codedHeight: height, timestamp: t0, duration: 1 / o.fps, colorSpace });
-      },
+      renderFrame: (t0) => renderer.render(t0, 1 / o.fps),
       renderAudio: plan.audio ? (a, b) => renderAudioWindow(doc, media, from + a, from + b, a) : undefined,
     });
+    return { used, smart: null, audioCopied: false };
   } finally {
-    await frames.dispose();
+    await renderer.dispose();
   }
-  return used;
+}
+
+/** 無劣化コピーと再エンコード（ブラウザ・ffmpeg 共通）を組み合わせて書き出す */
+export async function exportSmart(
+  media: MediaStore,
+  plan: SmartPlan,
+  out: { width: number; height: number; fps: number; codec: 'avc' | 'hevc'; duration: number; colorSpace: OutputColorSpace; from: number; includeAudio: boolean },
+  target: Target,
+  cb: {
+    encoder: SegmentEncoderFactory;
+    render: (t: number, duration: number) => Promise<VideoSample>;
+    audioFeed: (sources: ReadonlyMap<string, CopySource>) => import('./smartExport').AudioFeed;
+    onProgress: (r: number) => void;
+    signal: AbortSignal;
+  },
+): Promise<SmartExportStats> {
+  const sources = new Map<string, CopySource>();
+  const ids = new Set<string>();
+  for (const s of plan.sections) {
+    if (s.kind === 'copy') ids.add(s.mediaId);
+    else if (s.frames !== 'grid') ids.add(s.frames.mediaId);
+  }
+  if (plan.audio.copy) for (const p of plan.audio.parts) ids.add(p.mediaId);
+  for (const id of ids) {
+    const src = await media.copySource(id);
+    if (src) sources.set(id, src);
+  }
+  return runSmartExport(
+    {
+      width: out.width,
+      height: out.height,
+      fps: out.fps,
+      codec: out.codec,
+      duration: out.duration,
+      sections: plan.sections,
+      sources,
+      colorSpace: out.colorSpace,
+      codecString: plan.codecString,
+      primaryMediaId: plan.primaryMediaId,
+    },
+    target,
+    { renderFrame: cb.render, encoder: cb.encoder, audio: out.includeAudio ? cb.audioFeed(sources) : null, onProgress: cb.onProgress, signal: cb.signal },
+  );
 }

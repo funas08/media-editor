@@ -6,9 +6,10 @@ import { mainLayout } from '../core/timeline';
 import type { DocState } from '../core/types';
 
 /** 画質の選び方 */
-export type QualityMode = 'source' | 'max' | 'high' | 'standard' | 'small' | 'custom';
+export type QualityMode = 'smart' | 'source' | 'max' | 'high' | 'standard' | 'small' | 'custom';
 
 export const QUALITY_MODE_LABEL: Record<QualityMode, string> = {
+  smart: '元の画質を優先（可能な区間は無劣化コピー）',
   source: '元の動画に合わせる',
   max: '最高画質（品質固定）',
   high: '高画質',
@@ -131,6 +132,8 @@ export function resolveBitrate(
   const std = standardBitrate(size.width, size.height, size.fps, codec);
   const plain = { quantizer: null, fellBack: false, capped: false };
   switch (mode) {
+    // 無劣化コピーできない区間は「元の動画に合わせる」と同じビットレートで再エンコードする
+    case 'smart':
     case 'source': {
       if (!source || !(source.bitrate > 0)) return { ...plain, bitrate: std, fellBack: true };
       const want = equivalentBitrate(source, codec) * BROWSER_ENCODER_FACTOR;
