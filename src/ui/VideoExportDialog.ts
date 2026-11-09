@@ -2,6 +2,7 @@
 // 書き出す前に、この環境でエンコードできるかを確かめる。AAC が使えないときは理由を示し「音声なしで書き出す」を選べる。
 // 画質は「元の画質を優先（可能な区間は無劣化コピー）」（既定）/「元の動画に合わせる」/ 最高画質（品質固定）/ 高画質 / 標準 / 小さいファイル / ビットレートを指定。
 // エンコーダーは自動（ハードウェア優先）/ ハードウェア / ソフトウェアから選べる（比べるため）。予想ファイルサイズも表示する。
+// 「高画質書き出し（ローカルサーバ）」では、npm run export-server で起動したサーバの ffmpeg（x264 / x265）で圧縮する。
 
 import type { AssetStore } from '../core/AssetStore';
 import { audioSegments, formatTime, totalDuration } from '../core/timeline';
@@ -14,6 +15,8 @@ import {
   exportKeyFrameInterval,
   exportSource,
   exportVideo,
+  exportVideoFfmpeg,
+  ffmpegPlanFor,
   smartPlanFor,
   videoExportSize,
   type HwAccel,
@@ -40,6 +43,7 @@ import {
 import { ExportCanceledError } from '../media/exportPipeline';
 import type { MediaStore } from '../media/MediaStore';
 import { formatSeconds, type SmartPlan } from '../media/smartCopy';
+import { DEFAULT_SERVER_PORT, ExportServerClient, FFMPEG_AUDIO_BITRATE, FFMPEG_QUALITY, type FfmpegQuality, type ServerInfo } from '../media/exportServer';
 import { mainVideoMediaIds } from '../media/encodeSettings';
 import { button, checkbox, group, h, hint, numberInput, segmented, selectInput, text } from './controls';
 import { openDialog } from './Dialog';
@@ -63,6 +67,43 @@ function loadPrefs(): QualityPrefs {
     };
   } catch {
     return def;
+  }
+}
+
+const SERVER_KEY = 'image-editor.videoExport.server';
+const TOKEN_KEY = 'image-editor.exportServer.token';
+
+/** 高画質書き出し（ローカルサーバ）の設定 */
+interface ServerPrefs {
+  method: 'browser' | 'server';
+  port: number;
+  quality: FfmpegQuality;
+  codec: 'avc' | 'hevc';
+  smartCopy: boolean;
+}
+
+function loadServerPrefs(): ServerPrefs {
+  const def: ServerPrefs = { method: 'browser', port: DEFAULT_SERVER_PORT, quality: 'best', codec: 'avc', smartCopy: true };
+  try {
+    const p = JSON.parse(localStorage.getItem(SERVER_KEY) ?? 'null') as Partial<ServerPrefs> | null;
+    return {
+      method: p?.method === 'server' ? 'server' : 'browser',
+      port: Number.isInteger(p?.port) && p!.port! >= 1024 && p!.port! <= 65535 ? p!.port! : def.port,
+      quality: p?.quality && p.quality in FFMPEG_QUALITY ? p.quality : def.quality,
+      codec: p?.codec === 'hevc' ? 'hevc' : 'avc',
+      smartCopy: p?.smartCopy !== false,
+    };
+  } catch {
+    return def;
+  }
+}
+
+/** トークンはサーバを起動するたびに変わるので、このタブの間だけ覚えておく */
+function loadToken(): string {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) ?? '';
+  } catch {
+    return '';
   }
 }
 
@@ -93,6 +134,12 @@ export function openVideoExportDialog(
   // 元の画質を優先するときは、コーデックとフレームレートをメインの最初の動画に合わせておく（無劣化コピーの条件）
   if (prefs.mode === 'smart') matchSource();
   let smartPlan: SmartPlan | null = null;
+  const sp = loadServerPrefs();
+  let token = loadToken();
+  /** サーバの確認結果（未確認・接続できない場合は null） */
+  let serverInfo: ServerInfo | null = null;
+  let serverError = '';
+  const isServer = () => sp.method === 'server';
   let aacOk = true;
   let videoOk = true;
   let checking = true;
@@ -176,6 +223,76 @@ export function openVideoExportDialog(
   const smartText = text('', 'value');
   const smartNote = text('', 'hint pre-line');
   const smartGroup = group('無劣化コピー', smartText.el, smartNote.el);
+  // ---- 高画質書き出し（ローカルサーバ） ----
+  const methodSeg = segmented<ServerPrefs['method']>(
+    [
+      { value: 'browser', label: 'ブラウザで書き出し' },
+      { value: 'server', label: '高画質書き出し（ローカルサーバ）' },
+    ],
+    sp.method,
+    (v) => {
+      sp.method = v;
+      methodSeg.set(v);
+      void recheck();
+    },
+  );
+  const portInput = numberInput({
+    value: sp.port,
+    min: 1024,
+    max: 65535,
+    step: 1,
+    digits: 0,
+    onChange: (v) => {
+      sp.port = Math.round(v);
+      void recheck();
+    },
+  });
+  const tokenInput = h('input', { type: 'password', class: 'num token-input', placeholder: 'サーバに表示されたトークンを貼り付け', autocomplete: 'off', spellcheck: false }) as HTMLInputElement;
+  tokenInput.value = token;
+  tokenInput.addEventListener('change', () => {
+    token = tokenInput.value.trim();
+    try {
+      sessionStorage.setItem(TOKEN_KEY, token);
+    } catch {
+      // 覚えられなくても書き出しには影響しない
+    }
+    void recheck();
+  });
+  const connectBtn = button('接続を確認', () => {
+    tokenInput.dispatchEvent(new Event('change'));
+  });
+  const serverStatus = text('', 'hint pre-line');
+  const ffQualitySel = selectInput<FfmpegQuality>(
+    (Object.keys(FFMPEG_QUALITY) as FfmpegQuality[]).map((q) => ({ value: q, label: FFMPEG_QUALITY[q].label })),
+    sp.quality,
+    (v) => {
+      sp.quality = v;
+      update();
+    },
+  );
+  const ffCodecSel = selectInput<ServerPrefs['codec']>(
+    [
+      { value: 'avc', label: 'H.264（x264）' },
+      { value: 'hevc', label: 'H.265（x265）' },
+    ],
+    sp.codec,
+    (v) => {
+      sp.codec = v;
+      void recheck();
+    },
+  );
+  const ffCodecNote = text('', 'hint');
+  const ffSmartCb = checkbox('可能な区間は無劣化コピー（編集した区間だけを ffmpeg で圧縮）', sp.smartCopy, (v) => {
+    sp.smartCopy = v;
+    void recheck();
+  });
+  const serverGroups = [
+    group('ローカルサーバ', h('div', { class: 'row-inline' }, h('span', { class: 'hint' }, 'ポート'), portInput.el, tokenInput, connectBtn), serverStatus.el),
+    group('画質（ffmpeg）', ffQualitySel.el, hint(`CRF（画質を一定に保つ方式）。数字が小さいほど高画質・大きいファイルになります。音声は AAC ${FFMPEG_AUDIO_BITRATE / 1000}kbps`)),
+    group('映像のコーデック（ffmpeg）', ffCodecSel.el, ffCodecNote.el),
+    group('無劣化コピー（ffmpeg）', ffSmartCb.el),
+  ];
+
   const rangeSeg = segmented<string>(
     [
       { value: 'all', label: 'タイムライン全体' },
@@ -201,28 +318,33 @@ export function openVideoExportDialog(
 
   const cancelBtn = button('閉じる', () => (running ? controller?.abort() : dlg.close()));
   const exportBtn = button('書き出し', () => void run(), { primary: true });
+  const browserGroups = [
+    group('映像のコーデック', codecSel.el, codecNote.el),
+    group('エンコーダー', encoderSel.el, encoderNote.el),
+    group('画質', h('div', { class: 'row-inline' }, qualitySel.el, mbpsInput.el), bitrateText.el, bitrateNote.el),
+  ];
   const body = h(
     'div',
     { class: 'export-form' },
+    group('書き出し方法', methodSeg.el),
     group('形式', h('div', { class: 'value' }, 'MP4（音声 AAC）'), support.el),
+    ...serverGroups,
     group('書き出す範囲', rangeSeg.el, rangeNote.el),
     group('倍率（キャンバスに対して）', scaleSeg.el),
     group('書き出しサイズ', sizeText.el, sizeNote.el, scaleWarn.el),
     group('フレームレート', fpsSeg.el),
-    group('映像のコーデック', codecSel.el, codecNote.el),
-    group('エンコーダー', encoderSel.el, encoderNote.el),
-    group('画質', h('div', { class: 'row-inline' }, qualitySel.el, mbpsInput.el), bitrateText.el, bitrateNote.el),
+    ...browserGroups,
     smartGroup,
     group('音声', noAudioCb.el),
     group('色空間', colorNote.el),
     progressWrap,
-    hint('選んだファイルに少しずつ書き込みます。動画はこのパソコンの中だけで処理され、外部には送信されません。'),
+    hint('選んだファイルに少しずつ書き込みます。動画はこのパソコンの中だけで処理され、外部には送信されません（ローカルサーバもこのパソコンの中で動きます）。'),
   );
   const dlg = openDialog({ title: '動画の書き出し', body, actions: [cancelBtn, exportBtn], canClose: () => !running });
 
   let running = false;
   let controller: AbortController | null = null;
-  const controls = [codecSel.el, encoderSel.el, qualitySel.el, mbpsInput.input];
+  const controls = [codecSel.el, encoderSel.el, qualitySel.el, mbpsInput.input, portInput.input, tokenInput, connectBtn, ffQualitySel.el, ffCodecSel.el, ffSmartCb.input];
 
   function update(): void {
     const { width, height, adjusted } = videoExportSize(doc, prefs.scale);
@@ -241,8 +363,16 @@ export function openVideoExportDialog(
     }
     if (!aacOk && hasAudio) lines.push('⚠ この環境（ブラウザ／OS）では音声を AAC でエンコードできません。「音声なしで書き出す」を選ぶと書き出せます');
     if (!hasAudio) lines.push('音声の入ったクリップがないため、音声なしで書き出します');
-    support.set(checking ? '確認中…' : lines.join('\n') || '✓ この環境で書き出せます');
-    support.el.classList.toggle('warn', !checking && (!videoOk || (!aacOk && hasAudio)));
+    for (const g of browserGroups) g.hidden = isServer();
+    for (const g of serverGroups) g.hidden = !isServer();
+    if (isServer()) {
+      updateServer();
+      support.set(hasAudio ? '' : '音声の入ったクリップがないため、音声なしで書き出します');
+      support.el.classList.remove('warn');
+    } else {
+      support.set(checking ? '確認中…' : lines.join('\n') || '✓ この環境で書き出せます');
+      support.el.classList.toggle('warn', !checking && (!videoOk || (!aacOk && hasAudio)));
+    }
 
     // コーデック
     const codecNotes: string[] = [];
@@ -306,7 +436,34 @@ export function openVideoExportDialog(
     noAudioCb.input.disabled = !hasAudio || running;
     for (const c of controls) c.disabled = running;
     const withAudio = hasAudio && !noAudioCb.input.checked;
-    exportBtn.disabled = running || checking || durationNow() <= 0 || !videoOk || (withAudio && !aacOk);
+    exportBtn.disabled = isServer()
+      ? running || checking || durationNow() <= 0 || !serverReady()
+      : running || checking || durationNow() <= 0 || !videoOk || (withAudio && !aacOk);
+  }
+
+  /** サーバで書き出せる状態か */
+  function serverReady(): boolean {
+    if (!serverInfo) return false;
+    return sp.codec === 'avc' ? serverInfo.encoders.libx264 : serverInfo.encoders.libx265;
+  }
+
+  /** ローカルサーバの状態の表示 */
+  function updateServer(): void {
+    const lines: string[] = [];
+    if (checking) lines.push('確認中…');
+    else if (serverInfo) {
+      lines.push(`✓ 接続しました（${serverInfo.ffmpeg.replace(/ Copyright.*$/, '')}）`);
+      if (!serverReady()) lines.push(`⚠ この ffmpeg には ${sp.codec === 'avc' ? 'x264' : 'x265'} が入っていません`);
+    } else {
+      if (serverError) lines.push(`⚠ ${serverError}`);
+      lines.push(
+        '起動のしかた：プロジェクトのフォルダで npm run export-server を実行し、表示されたトークンを貼り付けて「接続を確認」を押してください。',
+        `（ポートを変えた場合は上の番号も合わせてください）。サーバがなくても「ブラウザで書き出し」を選べば書き出せます。`,
+      );
+    }
+    serverStatus.set(lines.join('\n'));
+    serverStatus.el.classList.toggle('warn', !checking && !serverReady());
+    ffCodecNote.set(sp.codec === 'hevc' ? 'H.265 は Windows 標準の再生ソフト（メディアプレーヤー・フォト）では再生できない場合があります（「HEVC ビデオ拡張機能」が必要）' : '');
   }
 
   /** コーデックとフレームレートを、メインの最初の動画に合わせる */
@@ -322,8 +479,9 @@ export function openVideoExportDialog(
 
   /** 無劣化コピーの表示 */
   function updateSmart(): void {
-    smartGroup.hidden = prefs.mode !== 'smart';
-    if (prefs.mode !== 'smart') return;
+    const show = isServer() ? sp.smartCopy : prefs.mode === 'smart';
+    smartGroup.hidden = !show;
+    if (!show) return;
     const p = smartPlan;
     if (checking || !p) {
       smartText.set('確認中…');
@@ -332,9 +490,9 @@ export function openVideoExportDialog(
     }
     smartText.set(`無劣化コピーできる区間：${formatSeconds(p.copySeconds)} / 全体 ${formatSeconds(p.totalSeconds)}`);
     const lines: string[] = [];
-    if (prefs.codec !== 'avc' && prefs.codec !== 'hevc') lines.push('⚠ 無劣化コピーは H.264 / H.265 のみです。コーデックを元の動画に合わせてください');
+    if (!isServer() && prefs.codec !== 'avc' && prefs.codec !== 'hevc') lines.push('⚠ 無劣化コピーは H.264 / H.265 のみです。コーデックを元の動画に合わせてください');
     if (p.copySeconds < p.totalSeconds - 1e-3 && p.reasons.length) lines.push('コピーできない区間の理由（その区間は再エンコード）：', ...p.reasons.map((r) => `・${r}`));
-    if (p.copySeconds === 0) lines.push('コピーできる区間がないため、全体を「元の動画に合わせる」と同じ設定で書き出します');
+    if (p.copySeconds === 0) lines.push(isServer() ? 'コピーできる区間がないため、全体を ffmpeg で圧縮します' : 'コピーできる区間がないため、全体を「元の動画に合わせる」と同じ設定で書き出します');
     const withAudio = hasAudio && !noAudioCb.input.checked;
     if (withAudio) lines.push(p.audio.copy ? '音声：元の音声をそのままコピー' : `音声：再エンコード（${p.audio.reason ?? ''}）`);
     smartNote.set(lines.join('\n'));
@@ -344,6 +502,23 @@ export function openVideoExportDialog(
     const seq = ++checkSeq;
     checking = true;
     update();
+    if (isServer()) {
+      serverInfo = null;
+      serverError = '';
+      if (token) {
+        try {
+          serverInfo = await new ExportServerClient(sp.port, token).info();
+        } catch (e) {
+          serverError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      if (seq !== checkSeq) return;
+      smartPlan = sp.smartCopy ? await ffmpegPlanFor(doc, media, ffmpegOptions()) : null;
+      if (seq !== checkSeq) return;
+      checking = false;
+      update();
+      return;
+    }
     const r = await checkVideoSupport(doc, media, prefs);
     if (seq !== checkSeq) return;
     if (prefs.mode === 'smart') {
@@ -364,10 +539,15 @@ export function openVideoExportDialog(
     update();
   }
 
+  function ffmpegOptions() {
+    return { scale: prefs.scale, fps: prefs.fps, codec: sp.codec, quality: sp.quality, smartCopy: sp.smartCopy, includeAudio: hasAudio && !noAudioCb.input.checked, range: useRange && ioRange ? ioRange : null };
+  }
+
   async function run(): Promise<void> {
     if (exportBtn.disabled) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prefs, v: PREFS_VERSION }));
+      localStorage.setItem(SERVER_KEY, JSON.stringify(sp));
     } catch {
       // 保存できなくても書き出しには影響しない
     }
@@ -381,7 +561,24 @@ export function openVideoExportDialog(
     for (const s of [scaleSeg, fpsSeg, rangeSeg]) s.el.classList.add('disabled');
     update();
     const startedAt = performance.now();
+    const onProgress = (r: number) => {
+      progress.value = r;
+      const elapsed = (performance.now() - startedAt) / 1000;
+      const remain = r > 0.01 ? (elapsed / r) * (1 - r) : 0;
+      progressText.set(`${Math.floor(r * 100)}%　経過 ${formatTime(elapsed, false)}${r > 0.01 ? `　残り約 ${formatTime(remain, false)}` : ''}`);
+    };
     try {
+      if (isServer()) {
+        const client = new ExportServerClient(sp.port, token);
+        const r = await exportVideoFfmpeg(doc, assets, media, client, ffmpegOptions(), dest.target, onProgress, controller.signal);
+        await dest.finish();
+        const q = FFMPEG_QUALITY[sp.quality];
+        const copied = r.smart.copiedSeconds > 0 ? `・無劣化コピー ${formatSeconds(r.smart.copiedSeconds)}／ffmpeg ${formatSeconds(r.smart.encodedSeconds)}` : '';
+        toast(`動画を書き出しました（${formatTime((performance.now() - startedAt) / 1000, false)}・${sp.codec === 'avc' ? 'x264' : 'x265'} CRF ${q.crf} ${q.preset}${copied}${r.audioCopied ? '・音声はコピー' : ''}）`);
+        running = false;
+        dlg.close();
+        return;
+      }
       const result = await exportVideo(
         doc,
         assets,
@@ -394,12 +591,7 @@ export function openVideoExportDialog(
           useQuantizer: quantizerOk === true,
         },
         dest.target,
-        (r) => {
-          progress.value = r;
-          const elapsed = (performance.now() - startedAt) / 1000;
-          const remain = r > 0.01 ? (elapsed / r) * (1 - r) : 0;
-          progressText.set(`${Math.floor(r * 100)}%　経過 ${formatTime(elapsed, false)}${r > 0.01 ? `　残り約 ${formatTime(remain, false)}` : ''}`);
-        },
+        onProgress,
         controller.signal,
       );
       await dest.finish();
@@ -414,7 +606,7 @@ export function openVideoExportDialog(
       dlg.close();
     } catch (e) {
       await dest.abort();
-      if (e instanceof ExportCanceledError) {
+      if (e instanceof ExportCanceledError || controller?.signal.aborted) {
         toast('書き出しをキャンセルしました');
       } else {
         console.error(e);

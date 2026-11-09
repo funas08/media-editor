@@ -10,6 +10,7 @@ import { drawScene } from '../render/scene';
 import { scheduleSegments } from './audioSchedule';
 import { runExport, type ExportPlan } from './exportPipeline';
 import type { MediaInfo, MediaStore } from './MediaStore';
+import { ExportServerClient, FFMPEG_AUDIO_BITRATE, ffmpegAudioFeed, ffmpegEncoderFactory, type FfmpegQuality } from './exportServer';
 import { planSmartCopy, type SmartPlan, type SourceVideoMeta } from './smartCopy';
 import { copyAudioFeed, encodeAudioFeed, mediabunnyEncoderFactory, runSmartExport, type CopySource, type SegmentEncoderFactory, type SmartExportStats } from './smartExport';
 import { SequentialFrames } from './SequentialFrames';
@@ -348,8 +349,6 @@ function frameRenderer(doc: DocState, assets: AssetStore, media: MediaStore, wid
       yuv = rgbaToI420(rgba, width, height, colorSpace, yuv);
       return new VideoSample(yuv, { format: 'I420', codedWidth: width, codedHeight: height, timestamp: t0, duration, colorSpace });
     },
-    /** 描いたフレームの I420 の中身（ffmpeg に送るとき用。次の render で上書きされる） */
-    lastYuv: () => yuv,
     dispose: () => frames.dispose(),
   };
 }
@@ -474,4 +473,69 @@ export async function exportSmart(
     target,
     { renderFrame: cb.render, encoder: cb.encoder, audio: out.includeAudio ? cb.audioFeed(sources) : null, onProgress: cb.onProgress, signal: cb.signal },
   );
+}
+
+// ---- 高画質書き出し（ローカルサーバの ffmpeg） ----
+
+export interface FfmpegExportOptions {
+  scale: number;
+  fps: 30 | 60;
+  codec: 'avc' | 'hevc';
+  quality: FfmpegQuality;
+  /** 可能な区間は無劣化コピーする */
+  smartCopy: boolean;
+  includeAudio: boolean;
+  range: { from: number; to: number } | null;
+}
+
+/** ffmpeg で書き出すときの無劣化コピーの計画（コピーしないときは全体を 1 つの再エンコード区間に） */
+export async function ffmpegPlanFor(doc: DocState, media: MediaStore, o: FfmpegExportOptions): Promise<SmartPlan> {
+  const prefs: QualityPrefs = { scale: o.scale, fps: o.fps, mode: 'smart', customMbps: 0, codec: o.codec, encoder: 'auto' };
+  const plan = await smartPlanFor(doc, media, { prefs, range: o.range, includeAudio: o.includeAudio, hardwareAcceleration: 'no-preference', ffmpeg: true });
+  if (o.smartCopy && plan.copySeconds > 0) return plan;
+  const duration = plan.totalSeconds;
+  return {
+    ...plan,
+    sections: duration > 0 ? [{ kind: 'render', start: 0, end: duration, frames: 'grid' }] : [],
+    copySeconds: 0,
+    codecString: null,
+    primaryMediaId: null,
+    audio: o.smartCopy ? plan.audio : { copy: false, reason: null },
+  };
+}
+
+/** ローカルサーバの ffmpeg で書き出す（無劣化コピーと組み合わせ、編集した区間だけを ffmpeg で圧縮する） */
+export async function exportVideoFfmpeg(
+  doc: DocState,
+  assets: AssetStore,
+  media: MediaStore,
+  client: ExportServerClient,
+  o: FfmpegExportOptions,
+  target: Target,
+  onProgress: (ratio: number) => void,
+  signal: AbortSignal,
+): Promise<{ smart: SmartExportStats; audioCopied: boolean; plan: SmartPlan }> {
+  const { width, height } = videoExportSize(doc, o.scale);
+  const colorSpace = exportColorSpace(doc, media);
+  const keyFrameInterval = exportKeyFrameInterval(doc, media);
+  const from = o.range ? o.range.from : 0;
+  const to = o.range ? o.range.to : totalDuration(doc);
+  const duration = Math.max(0, to - from);
+  const plan = await ffmpegPlanFor(doc, media, o);
+  const renderer = frameRenderer(doc, assets, media, width, height, from, colorSpace);
+  try {
+    const smart = await exportSmart(media, plan, { width, height, fps: o.fps, codec: o.codec, duration, colorSpace, from, includeAudio: o.includeAudio }, target, {
+      encoder: ffmpegEncoderFactory(client, { codec: o.codec, quality: o.quality, keyFrameInterval, colorSpace }, signal),
+      render: renderer.render,
+      audioFeed: (sources) =>
+        plan.audio.copy
+          ? copyAudioFeed(plan.audio.parts, sources)
+          : ffmpegAudioFeed(client, { duration, sampleRate: SAMPLE_RATE, channels: CHANNELS, bitrate: FFMPEG_AUDIO_BITRATE, render: (a, b) => renderAudioWindow(doc, media, from + a, from + b, a), signal }),
+      onProgress,
+      signal,
+    });
+    return { smart, audioCopied: o.includeAudio && plan.audio.copy, plan };
+  } finally {
+    await renderer.dispose();
+  }
 }

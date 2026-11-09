@@ -1212,3 +1212,9 @@ kbd {
 .pre-line {
   white-space: pre-line;
 }
+
+/* 動画の書き出し：ローカルサーバのトークン */
+.token-input {
+  flex: 3;
+  min-width: 10em;
+}
