@@ -245,7 +245,7 @@ export class App implements ToolHost {
     if (this.mode !== 'video') this.clipPanel.el.hidden = true;
     this.topBar.update(this.editor, this.view);
     this.emptyState.hidden = this.editor.doc.items.length > 0;
-    document.title = `${this.isDirty() ? '● ' : ''}${this.projectName ?? '無題'} - 画像エディタ`;
+    document.title = `${this.isDirty() ? '● ' : ''}${this.projectName ?? '無題'} - メディアエディタ`;
     this.requestRender();
   }
 

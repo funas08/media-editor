@@ -59,7 +59,7 @@ export class TopBar {
     this.el = h(
       'header',
       { class: 'topbar' },
-      h('div', { class: 'brand' }, '画像エディタ'),
+      h('div', { class: 'brand' }, 'メディアエディタ'),
       h('div', { class: 'segmented mode-switch', role: 'group', 'aria-label': 'モード' }, this.modeBtns.image, this.modeBtns.video),
       h(
         'div',

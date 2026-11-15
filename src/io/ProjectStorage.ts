@@ -47,7 +47,7 @@ export class LocalFileProjectStorage implements ProjectStorage {
       try {
         this.handle = await picker({
           suggestedName: withExt(opts.suggestedName),
-          types: [{ description: '画像エディタのプロジェクト', accept: { 'application/json': [PROJECT_EXT] } }],
+          types: [{ description: 'メディアエディタのプロジェクト', accept: { 'application/json': [PROJECT_EXT] } }],
         });
       } catch (e) {
         if (e instanceof DOMException && e.name === 'AbortError') return null;
